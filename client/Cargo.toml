@@ -1,0 +1,20 @@
+[package]
+name = "client"
+version = "0.1.0"
+authors = ["Jack Britton <jackxbritton@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+bincode = "1.2.1"
+game = { path = "../game" }
+generational-arena = "0.2"
+half = "1.6.0"
+nalgebra = "0.20"
+serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "0.2", features = ["full"] }
+
+[dependencies.sdl2]
+version = "0.34"
+default-features = false
+features = ["gfx"]
+
