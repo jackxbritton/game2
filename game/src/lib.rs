@@ -1,4 +1,5 @@
 use serde::{Serialize, Deserialize};
+use std::time::SystemTime;
 
 pub const NUM_RANDOM_BYTES: usize = 16;
 
@@ -17,8 +18,8 @@ pub struct Player {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlayerUpdate {
-    pub player: Player,
     pub tick: Tick,
+    pub player: Player,
 }
 
 // TODO(jack) ClientInit should be split into a handshake message and a game init message.
@@ -27,6 +28,7 @@ pub struct ClientInit {
     pub id: Id,
     pub random_bytes: [u8; NUM_RANDOM_BYTES],
     pub players: Vec<Player>,
+    pub tick_zero: SystemTime,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

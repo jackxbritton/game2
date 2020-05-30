@@ -1,10 +1,10 @@
 use futures::future::join_all;
 use generational_arena::{Arena, Index};
+use std::time::SystemTime;
 use nalgebra::Vector2;
 use std::error::Error;
 use std::net::SocketAddr;
 use std::num::Wrapping;
-use std::str::from_utf8;
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::prelude::*;
@@ -31,7 +31,7 @@ struct Player {
 
 }
 
-fn accept(players: &mut Arena<Player>, stream: TcpStream, mut internal_tcp_tx: Sender<(Index, Option<game::TcpServerMessage>)>) {
+fn accept(players: &mut Arena<Player>, stream: TcpStream, mut internal_tcp_tx: Sender<(Index, Option<game::TcpServerMessage>)>, tick_zero: SystemTime) {
 
     println!("connection!");
 
@@ -128,6 +128,7 @@ fn accept(players: &mut Arena<Player>, stream: TcpStream, mut internal_tcp_tx: S
             id,
             random_bytes,
             players: present_players,
+            tick_zero,
         })).unwrap();
         if let Err(err) = writer.write_all(&bytes[..]).await {
             eprintln!("{}", err);
@@ -239,6 +240,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (tcp_tx, mut tcp_rx) = channel(4);
 
     let mut tick = Wrapping(0);
+    let tick_zero = SystemTime::now();
 
     loop {
 
@@ -283,7 +285,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             },
 
             accept_result = tcp_listener.accept() => match accept_result {
-                Ok((stream, _)) => accept(&mut players, stream, tcp_tx.clone()),
+                Ok((stream, _)) => accept(&mut players, stream, tcp_tx.clone(), tick_zero.clone()),
                 Err(err) => {
                     eprintln!("{}", err);
                     break
