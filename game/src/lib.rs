@@ -5,21 +5,23 @@ pub const NUM_RANDOM_BYTES: usize = 16;
 pub type Id = u8;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Player {
+    pub id: Id,
+    pub x: f32,
+    pub y: f32,
+}
+
+// TODO(jack) ClientInit should be split into a handshake message and a game init message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientInit {
     pub id: Id,
     pub random_bytes: [u8; NUM_RANDOM_BYTES],
+    pub players: Vec<Player>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerInit {
     pub random_bytes: [u8; NUM_RANDOM_BYTES],
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct PlayerUpdate {
-    pub id: Id,
-    pub x: f32,
-    pub y: f32,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -53,7 +55,7 @@ pub enum TcpServerMessage {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum UdpClientMessage {
-    PlayerUpdate(PlayerUpdate),
+    Player(Player),
 }
 
 #[derive(Debug, Serialize, Deserialize)]

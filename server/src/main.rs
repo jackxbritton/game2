@@ -98,6 +98,8 @@ fn accept(players: &mut Arena<Player>, stream: TcpStream, mut internal_tcp_tx: S
 
     let random_bytes = players[idx].random_bytes.clone();
 
+    let present_players = players.iter().map(|(_, p)| game::Player { id, x: p.position.x as f32, y: p.position.y as f32 }).collect();
+
     tokio::spawn(async move {
 
         // Send the init packet.
@@ -106,6 +108,7 @@ fn accept(players: &mut Arena<Player>, stream: TcpStream, mut internal_tcp_tx: S
         let bytes = bincode::serialize(&game::TcpClientMessage::Init(game::ClientInit {
             id,
             random_bytes,
+            players: present_players,
         })).unwrap();
         if let Err(err) = writer.write_all(&bytes[..]).await {
             eprintln!("{}", err);
@@ -183,16 +186,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 let dt = 1.0 / tick_rate as f64; // TODO(jack) Measure actual elapsed time.
                 step(&mut players, dt);
 
-                // TODO(jack) Broadcast all player positions to all players.
                 // Broadcast.
+                let msgs: Vec<_> = players
+                    .iter()
+                    .filter(|(_, p)| p.udp_addr.is_some())
+                    .map(|(_, p)| bincode::serialize(
+                        &game::UdpClientMessage::Player(game::Player {
+                            id: p.id,
+                            x: p.position.x as f32,
+                            y: p.position.y as f32,
+                        }
+                    )).unwrap())
+                    .collect();
                 for (_, player) in players.iter().filter(|(_, p)| p.udp_addr.is_some()) {
-                    let msg = game::UdpClientMessage::PlayerUpdate( game::PlayerUpdate {
-                        id: player.id,
-                        x: player.position.x as f32,
-                        y: player.position.y as f32,
-                    });
-                    let bytes = bincode::serialize(&msg).unwrap();
-                    udp_socket.send_to(&bytes, player.udp_addr.unwrap()).await?;
+                    for bytes in &msgs {
+                        udp_socket.send_to(&bytes, player.udp_addr.unwrap()).await?;
+                    }
                 }
 
             },

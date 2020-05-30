@@ -20,6 +20,9 @@ struct Player {
     position: Vector2<f64>,
 }
 
+// TODO(jack) Remove the UDP channels and inline it in the main loop.
+// It's too slow.
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
 
@@ -42,18 +45,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Parse player id and random bytes from init message.
     let tcp_init_message: game::TcpClientMessage = bincode::deserialize(&buf[..num_bytes])?;
-    let (id, random_bytes) = match tcp_init_message {
-        game::TcpClientMessage::Init(game::ClientInit { id, random_bytes}) => (id, random_bytes),
+    let init = match tcp_init_message {
+        game::TcpClientMessage::Init(init) => init,
         _ => panic!("Received unexpected message from server!"),
     };
 
     // Declare players arena.
     let max_players = 16;
     let mut players = Arena::with_capacity(max_players);
-    let player_idx = players.insert(Player {
-        id,
-        position: Vector2::new(0.0, 0.0),
-    });
+    for player in &init.players {
+        players.insert(Player {
+            id: init.id,
+            position: Vector2::new(player.x as f64, player.y as f64),
+        });
+    }
+    let (player_idx, _) = players.iter().find(|(_, p)| p.id == init.id).unwrap();
 
     // Open the UDP socket and ping the init message back until we get a response.
     let mut udp_socket = UdpSocket::bind("0.0.0.0:0").await?;
@@ -62,7 +68,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                udp_socket.send(bincode::serialize(&game::UdpServerMessage::Init(game::ServerInit { random_bytes }))?.as_slice()).await?;
+                udp_socket.send(bincode::serialize(&game::UdpServerMessage::Init(game::ServerInit { random_bytes: init.random_bytes }))?.as_slice()).await?;
             },
             _ = udp_socket.recv(&mut buf) => break,
         };
@@ -87,8 +93,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     Ok(MAX_PACKET_SIZE_PLUS_ONE) => break,
                     Ok(num_bytes) => {
                         // Send the message down the internal channel.
-                        println!("deserializing tcp message with length {}", num_bytes);
-                        println!("{:?}", &buf[..num_bytes]);
                         let tcp_message: game::TcpClientMessage = match bincode::deserialize(&buf[..num_bytes]) {
                             Ok(msg) => msg,
                             Err(err) => {
@@ -233,7 +237,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
         match udp_rx.try_recv() {
             Ok(msg) => match msg {
-                game::UdpClientMessage::PlayerUpdate(game::PlayerUpdate { id, x, y}) => {
+                game::UdpClientMessage::Player(game::Player { id, x, y}) => {
                     let (x, y) = (x as f64, y as f64);
                     if let Some((_, player)) = players.iter_mut().find(|(_, p)| p.id == id) {
                         player.position.x = x;
