@@ -1,3 +1,5 @@
+use generational_arena::Arena;
+use nalgebra::Vector2;
 use sdl2::event::Event;
 use sdl2::gfx::primitives::DrawRenderer;
 use sdl2::keyboard::Keycode;
@@ -9,15 +11,27 @@ use tokio::prelude::*;
 use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::error::{TryRecvError, TrySendError};
 use tokio::time::interval;
+use std::env;
 
 use game;
+
+struct Player {
+    id: game::Id,
+    position: Vector2<f64>,
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
 
     // Connect with the server.
 
-    let addr = "127.0.0.1:5000";
+    let args: Vec<String> = env::args().collect();
+    if args.len() != 2 {
+        eprintln!("Usage: {} HOST:PORT", args[0]);
+        return Ok(())
+    }
+    let addr = &args[1];
+
     println!("Connecting to {}...", addr);
     let mut tcp_stream = TcpStream::connect(addr).await?;
 
@@ -26,22 +40,29 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut buf: [u8; MAX_PACKET_SIZE_PLUS_ONE] = [0; MAX_PACKET_SIZE_PLUS_ONE];
     let num_bytes = tcp_stream.read(&mut buf).await?;
 
-    let mut buf2: [u8; MAX_PACKET_SIZE_PLUS_ONE] = [0; MAX_PACKET_SIZE_PLUS_ONE];  // TODO(jack) Hilarious.
-
-    // Parse random bytes from init message.
+    // Parse player id and random bytes from init message.
     let tcp_init_message: game::TcpClientMessage = bincode::deserialize(&buf[..num_bytes])?;
-    let random_bytes = match tcp_init_message {
-        game::TcpClientMessage::Init(game::Init { random_bytes}) => random_bytes,
+    let (id, random_bytes) = match tcp_init_message {
+        game::TcpClientMessage::Init(game::ClientInit { id, random_bytes}) => (id, random_bytes),
+        _ => panic!("Received unexpected message from server!"),
     };
 
+    // Declare players arena.
+    let max_players = 16;
+    let mut players = Arena::with_capacity(max_players);
+    let player_idx = players.insert(Player {
+        id,
+        position: Vector2::new(0.0, 0.0),
+    });
+
     // Open the UDP socket and ping the init message back until we get a response.
-    let mut udp_socket = UdpSocket::bind("127.0.0.1:0").await?;
+    let mut udp_socket = UdpSocket::bind("0.0.0.0:0").await?;
     udp_socket.connect(addr).await?;
     let mut ticker = interval(Duration::from_secs(1));
     loop {
         tokio::select! {
             _ = ticker.tick() => {
-                udp_socket.send(bincode::serialize(&game::UdpServerMessage::Init(game::Init { random_bytes }))?.as_slice()).await?;
+                udp_socket.send(bincode::serialize(&game::UdpServerMessage::Init(game::ServerInit { random_bytes }))?.as_slice()).await?;
             },
             _ = udp_socket.recv(&mut buf) => break,
         };
@@ -54,6 +75,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let (mut internal_udp_tx, mut udp_rx) = channel(4);
     let (mut udp_tx, mut internal_udp_rx) = channel(4);
 
+    let mut buf2: [u8; MAX_PACKET_SIZE_PLUS_ONE] = [0; MAX_PACKET_SIZE_PLUS_ONE];  // TODO(jack) Hilarious.
+
     let (mut udp_reader, mut udp_writer) = udp_socket.split();
     tokio::spawn(async move {
         let (mut tcp_reader, mut tcp_writer) = tcp_stream.split();
@@ -64,10 +87,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     Ok(MAX_PACKET_SIZE_PLUS_ONE) => break,
                     Ok(num_bytes) => {
                         // Send the message down the internal channel.
+                        println!("deserializing tcp message with length {}", num_bytes);
+                        println!("{:?}", &buf[..num_bytes]);
                         let tcp_message: game::TcpClientMessage = match bincode::deserialize(&buf[..num_bytes]) {
                             Ok(msg) => msg,
                             Err(err) => {
-                                eprintln!("{}", err);
+                                eprintln!("failed to deserialize TCP message: {}", err);
                                 break
                             }
                         };
@@ -154,12 +179,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let sdl = sdl2::init()?;
     let sdl_video = sdl.video()?;
-    let window = sdl_video.window("game", 600, 480).build()?;
-    let mut canvas = window.into_canvas().accelerated().present_vsync().build()?;
+    let window = sdl_video
+        .window("game", 600, 480)
+        .resizable()
+        .build()?;
+    let mut canvas = window
+        .into_canvas()
+        .accelerated()
+        .present_vsync()
+        .build()?;
 
     let mut event_pump = sdl.event_pump()?;
 
-    let (mut gx, mut gy) = (0.0, 0.0);
     let (mut gup, mut gleft, mut gdown, mut gright) = (false, false, false, false);
 
     'game: loop {
@@ -184,33 +215,60 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         // Read TCP and UDP messages.
         match tcp_rx.try_recv() {
-            Ok(_) => println!("received a tcp message!"),
+            Ok(msg) => match msg {
+                game::TcpClientMessage::PlayerJoined(game::PlayerJoined { id }) => {
+                    if let Some((_, _)) = players.iter_mut().find(|(_, p)| p.id == id) {
+                        // TODO(jack) Eventually initialize the player.
+                    } else {
+                        players.insert(Player {
+                            id,
+                            position: Vector2::new(0.0, 0.0),
+                        });
+                    }
+                },
+                _ => eprintln!("received unknown message from server: {:?}", msg),
+            },
             Err(TryRecvError::Empty) => (),
             Err(TryRecvError::Closed) => break,
         }
         match udp_rx.try_recv() {
             Ok(msg) => match msg {
-                game::UdpClientMessage::PlayerUpdate(game::PlayerUpdate { x, y}) => {
-                    gx = x;
-                    gy = y;
+                game::UdpClientMessage::PlayerUpdate(game::PlayerUpdate { id, x, y}) => {
+                    let (x, y) = (x as f64, y as f64);
+                    if let Some((_, player)) = players.iter_mut().find(|(_, p)| p.id == id) {
+                        player.position.x = x;
+                        player.position.y = y;
+                    } else {
+                        players.insert(Player {
+                            id,
+                            position: Vector2::new(x, y),
+                        });
+                    }
                 },
             },
             Err(TryRecvError::Empty) => (),
             Err(TryRecvError::Closed) => break,
         }
 
-        // Also write for fun.
+        // Send input.
         let msg = game::UdpServerMessage::PlayerInput(game::PlayerInput {up: gup.clone(), left: gleft.clone(), down: gdown.clone(), right: gright.clone()});
         match udp_tx.try_send(msg) {
             Ok(_) => (),
             Err(TrySendError::Closed(_)) => break,
-            Err(TrySendError::Full(_)) => eprintln!("tcp channel is full!"),
+            Err(TrySendError::Full(_)) => eprintln!("udp channel is full!"),
         };
 
         canvas.set_draw_color(Color::RGB(0, 0, 0));
         canvas.clear();
 
-        canvas.filled_circle((gx * 800.0) as i16, (gy * 800.0) as i16, 40, Color::RGB(255, 255, 255))?;
+        for (idx, player) in players.iter() {
+            let color = if idx == player_idx {
+                Color::RGB(255, 255, 255)
+            } else {
+                Color::RGB(255, 0, 0)
+            };
+            canvas.filled_circle((player.position.x * 800.0) as i16, (player.position.y * 800.0) as i16, 40, color)?;
+        }
 
         canvas.present();
     }
