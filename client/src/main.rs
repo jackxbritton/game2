@@ -9,7 +9,7 @@ use std::time::Duration;
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::prelude::*;
 use tokio::sync::mpsc::channel;
-use tokio::sync::mpsc::error::{TryRecvError, TrySendError};
+use tokio::sync::mpsc::error::TryRecvError;
 use tokio::time::interval;
 use std::env;
 
@@ -54,8 +54,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let max_players = 16;
     let mut players = Arena::with_capacity(max_players);
     for player in &init.players {
+        println!("a: {}", player.id);
         players.insert(Player {
-            id: init.id,
+            id: player.id,
             position: Vector2::new(player.x as f64, player.y as f64),
         });
     }
@@ -75,105 +76,93 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     // We're in! Launch separate tasks to read TCP and UDP.
+    // TODO(jack) This is super slow. I may want to move away from tokio.
 
     let (mut internal_tcp_tx, mut tcp_rx) = channel(4);
     let (mut tcp_tx, mut internal_tcp_rx) = channel(4);
     let (mut internal_udp_tx, mut udp_rx) = channel(4);
-    let (mut udp_tx, mut internal_udp_rx) = channel(4);
-
-    let mut buf2: [u8; MAX_PACKET_SIZE_PLUS_ONE] = [0; MAX_PACKET_SIZE_PLUS_ONE];  // TODO(jack) Hilarious.
 
     let (mut udp_reader, mut udp_writer) = udp_socket.split();
+    let (mut tcp_reader, mut tcp_writer) = tcp_stream.into_split();
     tokio::spawn(async move {
-        let (mut tcp_reader, mut tcp_writer) = tcp_stream.split();
+        let mut buf: [u8; MAX_PACKET_SIZE_PLUS_ONE] = [0; MAX_PACKET_SIZE_PLUS_ONE];
         loop {
-            tokio::select! {
-                result = tcp_reader.read(&mut buf) => match result {
-                    Ok(0) => break,
-                    Ok(MAX_PACKET_SIZE_PLUS_ONE) => break,
-                    Ok(num_bytes) => {
-                        // Send the message down the internal channel.
-                        let tcp_message: game::TcpClientMessage = match bincode::deserialize(&buf[..num_bytes]) {
-                            Ok(msg) => msg,
-                            Err(err) => {
-                                eprintln!("failed to deserialize TCP message: {}", err);
-                                break
-                            }
-                        };
-                        match internal_tcp_tx.send(tcp_message).await {
-                            Ok(_) => (),
-                            Err(err) => {
-                                eprintln!("{}", err);
-                                break
-                            },
-                        };
-                    },
-                    Err(err) => {
-                        eprintln!("{}", err);
-                        break
-                    },
+            match tcp_reader.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(MAX_PACKET_SIZE_PLUS_ONE) => break,
+                Ok(num_bytes) => {
+                    // Send the message down the internal channel.
+                    let tcp_message: game::TcpClientMessage = match bincode::deserialize(&buf[..num_bytes]) {
+                        Ok(msg) => msg,
+                        Err(err) => {
+                            eprintln!("failed to deserialize TCP message: {}", err);
+                            break
+                        }
+                    };
+                    match internal_tcp_tx.send(tcp_message).await {
+                        Ok(_) => (),
+                        Err(err) => {
+                            eprintln!("{}", err);
+                            break
+                        },
+                    };
                 },
-                result = udp_reader.recv(&mut buf2) => match result {
-                    Ok(0) => break,
-                    Ok(MAX_PACKET_SIZE_PLUS_ONE) => break,
-                    Ok(num_bytes) => {
-                        // Send the message down the internal channel.
-                        let udp_message: game::UdpClientMessage = match bincode::deserialize(&buf2[..num_bytes]) {
-                            Ok(msg) => msg,
-                            Err(err) => {
-                                eprintln!("{}", err);
-                                break
-                            }
-                        };
-                        match internal_udp_tx.send(udp_message).await {
-                            Ok(_) => (),
-                            Err(err) => {
-                                eprintln!("{}", err);
-                                break
-                            },
-                        };
-                    },
-                    Err(err) => {
-                        eprintln!("{}", err);
-                        break
-                    },
+                Err(err) => {
+                    eprintln!("{}", err);
+                    break
                 },
-                option = internal_tcp_rx.recv() => match option {
-                    Some(msg) => {
-                        match tcp_writer.write(match bincode::serialize(msg) {
-                            Ok(msg) => msg,
-                            Err(err) => {
-                                eprintln!("{}", err);
-                                break
-                            },
-                        }.as_slice()).await {
-                            Ok(_) => (),
-                            Err(err) => {
-                                eprintln!("{}", err);
-                                break
-                            }
-                        };
-                    },
-                    None => break,
+            };
+        }
+    });
+    tokio::spawn(async move {
+        let mut buf: [u8; MAX_PACKET_SIZE_PLUS_ONE] = [0; MAX_PACKET_SIZE_PLUS_ONE];
+        loop {
+            match udp_reader.recv(&mut buf).await {
+                Ok(0) => break,
+                Ok(MAX_PACKET_SIZE_PLUS_ONE) => break,
+                Ok(num_bytes) => {
+                    // Send the message down the internal channel.
+                    let udp_message: game::UdpClientMessage = match bincode::deserialize(&buf[..num_bytes]) {
+                        Ok(msg) => msg,
+                        Err(err) => {
+                            eprintln!("{}", err);
+                            break
+                        }
+                    };
+                    match internal_udp_tx.send(udp_message).await {
+                        Ok(_) => (),
+                        Err(err) => {
+                            eprintln!("{}", err);
+                            break
+                        },
+                    };
                 },
-                option = internal_udp_rx.recv() => match option {
-                    Some(msg) => {
-                        match udp_writer.send(match bincode::serialize(&msg) {
-                            Ok(msg) => msg,
-                            Err(err) => {
-                                eprintln!("{}", err);
-                                break
-                            },
-                        }.as_slice()).await {
-                            Ok(_) => (),
-                            Err(err) => {
-                                eprintln!("{}", err);
-                                break
-                            }
-                        };
-                    },
-                    None => break,
+                Err(err) => {
+                    eprintln!("{}", err);
+                    break
                 },
+            };
+        }
+    });
+    tokio::spawn(async move {
+        loop {
+            match internal_tcp_rx.recv().await {
+                Some(msg) => {
+                    match tcp_writer.write(match bincode::serialize(msg) {
+                        Ok(msg) => msg,
+                        Err(err) => {
+                            eprintln!("{}", err);
+                            break
+                        },
+                    }.as_slice()).await {
+                        Ok(_) => (),
+                        Err(err) => {
+                            eprintln!("{}", err);
+                            break
+                        }
+                    };
+                },
+                None => break,
             };
         }
     });
@@ -221,13 +210,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
         match tcp_rx.try_recv() {
             Ok(msg) => match msg {
                 game::TcpClientMessage::PlayerJoined(game::PlayerJoined { id }) => {
-                    if let Some((_, _)) = players.iter_mut().find(|(_, p)| p.id == id) {
-                        // TODO(jack) Eventually initialize the player.
+                    if let Some((_, _)) = players.iter().find(|(_, p)| p.id == id) {
+                        // TODO(jack) Initialize the player.
                     } else {
+                        println!("b: {}", id);
                         players.insert(Player {
                             id,
                             position: Vector2::new(0.0, 0.0),
                         });
+                    }
+                },
+                game::TcpClientMessage::PlayerLeft(game::PlayerLeft { id }) => {
+                    if let Some((idx, _)) = players.iter().find(|(_, p)| p.id == id) {
+                        println!("dropping player {}", players[idx].id);
+                        players.remove(idx);
                     }
                 },
                 _ => eprintln!("received unknown message from server: {:?}", msg),
@@ -235,31 +231,30 @@ async fn main() -> Result<(), Box<dyn Error>> {
             Err(TryRecvError::Empty) => (),
             Err(TryRecvError::Closed) => break,
         }
-        match udp_rx.try_recv() {
-            Ok(msg) => match msg {
-                game::UdpClientMessage::Player(game::Player { id, x, y}) => {
-                    let (x, y) = (x as f64, y as f64);
-                    if let Some((_, player)) = players.iter_mut().find(|(_, p)| p.id == id) {
-                        player.position.x = x;
-                        player.position.y = y;
-                    } else {
-                        players.insert(Player {
-                            id,
-                            position: Vector2::new(x, y),
-                        });
-                    }
+        loop {
+            match udp_rx.try_recv() {
+                Ok(msg) => match msg {
+                    game::UdpClientMessage::Player(game::Player { id, x, y}) => {
+                        let (x, y) = (x as f64, y as f64);
+                        if let Some((_, player)) = players.iter_mut().find(|(_, p)| p.id == id) {
+                            player.position.x = x;
+                            player.position.y = y;
+                        }
+                    },
                 },
-            },
-            Err(TryRecvError::Empty) => (),
-            Err(TryRecvError::Closed) => break,
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Closed) => break 'game,
+            }
         }
 
         // Send input.
         let msg = game::UdpServerMessage::PlayerInput(game::PlayerInput {up: gup.clone(), left: gleft.clone(), down: gdown.clone(), right: gright.clone()});
-        match udp_tx.try_send(msg) {
+        match udp_writer.send(bincode::serialize(&msg).unwrap().as_slice()).await {
             Ok(_) => (),
-            Err(TrySendError::Closed(_)) => break,
-            Err(TrySendError::Full(_)) => eprintln!("udp channel is full!"),
+            Err(err) => {
+                eprintln!("{}", err);
+                break
+            }
         };
 
         canvas.set_draw_color(Color::RGB(0, 0, 0));

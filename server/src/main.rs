@@ -61,7 +61,6 @@ fn accept(players: &mut Arena<Player>, stream: TcpStream, mut internal_tcp_tx: S
         .map(|(_, p)| p.tcp_tx.clone())
         .collect();
     tokio::spawn(async move {
-        // TODO(jack) Writing to this channel doesn't do what I think it does..
         let bytes = bincode::serialize(&game::TcpClientMessage::PlayerJoined(game::PlayerJoined {id})).unwrap();
         let join_handles = tcp_txs
             .iter_mut()
@@ -98,7 +97,7 @@ fn accept(players: &mut Arena<Player>, stream: TcpStream, mut internal_tcp_tx: S
 
     let random_bytes = players[idx].random_bytes.clone();
 
-    let present_players = players.iter().map(|(_, p)| game::Player { id, x: p.position.x as f32, y: p.position.y as f32 }).collect();
+    let present_players = players.iter().map(|(_, p)| game::Player { id: p.id, x: p.position.x as f32, y: p.position.y as f32 }).collect();
 
     tokio::spawn(async move {
 
@@ -218,6 +217,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
             recv_result = tcp_rx.recv() => match recv_result {
                 Some((idx, bytes)) if bytes.len() == 0 => {
                     println!("disconnection!");
+                    let id = players[idx].id;
+                    let mut tcp_txs: Vec<Sender<Vec<u8>>> = players
+                        .iter()
+                        .filter(|(other_idx, _)| *other_idx != idx)
+                        .map(|(_, p)| p.tcp_tx.clone())
+                        .collect();
+                    tokio::spawn(async move {
+                        let bytes = bincode::serialize(&game::TcpClientMessage::PlayerLeft(game::PlayerLeft {id})).unwrap();
+                        let join_handles = tcp_txs
+                            .iter_mut()
+                            .map(|tcp_tx| tcp_tx.send(bytes.clone())); // TODO(jack) Can we do this without allocations?
+                        join_all(join_handles).await;
+                    });
                     players.remove(idx);
                 },
                 Some((idx, bytes)) => println!("{:?}: {}", idx, from_utf8(&bytes[..]).unwrap_or("invalid utf-8 :(")),
