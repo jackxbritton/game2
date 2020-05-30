@@ -19,6 +19,8 @@ use game;
 struct Player {
     id: game::Id,
     position: Vector2<f64>,
+    velocity: Vector2<f64>,
+    radius: f64,
 }
 
 // TODO(jack) Remove the UDP channels and inline it in the main loop.
@@ -59,6 +61,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         players.insert(Player {
             id: player.id,
             position: Vector2::new(player.x as f64, player.y as f64),
+            velocity: Vector2::new(player.vx as f64, player.vy as f64),
+            radius: player.radius as f64,
         });
     }
     let (player_idx, _) = players.iter().find(|(_, p)| p.id == init.id).unwrap();
@@ -219,11 +223,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
             Ok(msg) => match msg {
                 game::TcpClientMessage::PlayerJoined(game::PlayerJoined { id }) => {
                     if let Some((_, _)) = players.iter().find(|(_, p)| p.id == id) {
-                        // TODO(jack) Initialize the player.
+                        // TODO(jack) The player already exists, so initialize it.
                     } else {
                         players.insert(Player {
                             id,
                             position: Vector2::new(0.0, 0.0),
+                            velocity: Vector2::new(0.0, 0.0),
+                            radius: 1.0,
                         });
                     }
                 },
@@ -241,12 +247,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
         loop {
             match udp_rx.try_recv() {
                 Ok(msg) => match msg {
-                    game::UdpClientMessage::PlayerUpdate(game::PlayerUpdate{ tick, player: game::Player { id, x, y}}) => {
+                    game::UdpClientMessage::PlayerUpdate(game::PlayerUpdate{ tick, player: game::Player { id, x, y, vx, vy, radius}}) => {
                         last_tick = tick;
-                        let (x, y) = (x as f64, y as f64);
+                        let (x, y, vx, vy) = (x as f64, y as f64, vx as f64, vy as f64);
                         if let Some((_, player)) = players.iter_mut().find(|(_, p)| p.id == id) {
                             player.position.x = x;
                             player.position.y = y;
+                            player.velocity.x = vx;
+                            player.velocity.y = vy;
+                            player.radius = radius as f64;
                         }
                     },
                 },
@@ -274,11 +283,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
             } else {
                 Color::RGB(255, 0, 0)
             };
-            canvas.filled_circle((player.position.x * 800.0) as i16, (player.position.y * 800.0) as i16, 40, color)?;
+            let scale = 40.0;
+            canvas.filled_circle((player.position.x * scale) as i16, (player.position.y * scale) as i16, (player.radius * scale) as i16, color)?;
         }
 
         let surface = font
-            .render(&format!("hello there\n{}", last_tick))
+            .render(&format!("({:.1}, {:.1})", players[player_idx].velocity.x, players[player_idx].velocity.y))
             .blended(Color::RGB(255, 255, 255))?;
         let texture = texture_creator.create_texture_from_surface(&surface)?;
         canvas.copy(&texture, None, Rect::new(0, 0, surface.width(), surface.height()))?;

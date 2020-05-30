@@ -13,8 +13,6 @@ use tokio::time::interval;
 
 use game;
 
-// TODO(jack) Use game::* types in channels.
-
 #[derive(Debug)]
 struct Player {
 
@@ -28,19 +26,17 @@ struct Player {
     position: Vector2<f64>,
     velocity: Vector2<f64>,
     input: Vector2<f64>,
+
+    radius: f64,
+
 }
 
 fn accept(players: &mut Arena<Player>, stream: TcpStream, mut internal_tcp_tx: Sender<(Index, Vec<u8>)>) {
 
-    if players.len() == players.capacity() {
-        println!("rejecting connection; too many players");
-        return
-    }
-
     println!("connection!");
 
     let (tx, mut rx) = channel(4);
-    let idx = players.insert(Player {
+    let idx = match players.try_insert(Player {
         tcp_tx: tx,
         id: 0,  // Set below.
         udp_addr: None,
@@ -48,7 +44,14 @@ fn accept(players: &mut Arena<Player>, stream: TcpStream, mut internal_tcp_tx: S
         position: Vector2::new(0.0, 0.0),
         velocity: Vector2::new(0.0, 0.0),
         input: Vector2::new(0.0, 0.0),
-    });
+        radius: 1.0,
+    }) {
+        Ok(idx) => idx,
+        Err(_) => {
+            println!("rejecting connection; too many players");
+            return
+        },
+    };
     // Set the user ID to the arena index.
     let id = idx.into_raw_parts().0 as u8;
     players[idx].id = id;
@@ -98,7 +101,16 @@ fn accept(players: &mut Arena<Player>, stream: TcpStream, mut internal_tcp_tx: S
 
     let random_bytes = players[idx].random_bytes.clone();
 
-    let present_players = players.iter().map(|(_, p)| game::Player { id: p.id, x: p.position.x as f32, y: p.position.y as f32 }).collect();
+    let present_players = players
+        .iter()
+        .map(|(_, p)| game::Player {
+            id: p.id,
+            x: p.position.x as f32,
+            y: p.position.y as f32,
+            vx: p.velocity.x as f32,
+            vy: p.velocity.y as f32,
+            radius: p.radius as f32,
+        }).collect();
 
     tokio::spawn(async move {
 
@@ -132,28 +144,74 @@ fn accept(players: &mut Arena<Player>, stream: TcpStream, mut internal_tcp_tx: S
 
 fn step(players: &mut Arena<Player>, dt: f64) {
 
-    for (_, player) in players.iter_mut() {
+    // Manage collisions.
 
-        // Acceleration / deceleration time in seconds.
-        let acceleration = 0.05;
-        let friction = 0.7;
-        let velocity_max = 1.0;
+    // We have to collect the idxs to avoid borrowing `players`.
+    let idxs: Vec<_> = players
+        .iter()
+        .map(|(idx, _)| idx)
+        .collect();
 
-        let acceleration = 2.0 * velocity_max / acceleration;
-        let friction = velocity_max / friction;
+    let idx_pairs = idxs
+        .iter()
+        .map(|a| {
+            idxs.iter().map(move |b| (a, b))
+        })
+        .flatten()
+        .filter(|(a, b)| a.into_raw_parts().0 < b.into_raw_parts().0);
 
-        // let adjusted_acceleration = acceleration * (1.0 - player.velocity.dot(&player.input) / velocity_max) + friction;
-        let adjusted_acceleration = acceleration * (1.0 - player.velocity.magnitude() / velocity_max) + friction;
-        let new_velocity = player.velocity + adjusted_acceleration * player.input * dt;
+    for (a, b) in idx_pairs {
 
-        // Apply friction.
-        let new_velocity_magnitude_unclamped = new_velocity.magnitude() - dt * friction;
-        let new_velocity_magnitude = if new_velocity_magnitude_unclamped < 0.0 { 0.0 } else { new_velocity_magnitude_unclamped };
-        player.velocity = new_velocity_magnitude * new_velocity.try_normalize(0.0).unwrap_or(Vector2::new(0.0, 0.0));
+        let (a, b) = players.get2_mut(*a, *b);
+        let a = a.unwrap();
+        let b = b.unwrap();
 
-        player.position += dt * player.velocity;
+        let distance = match a.position - b.position {
+            v if v.x == 0.0 && v.y == 0.0 => Vector2::new(0.001, 0.001),
+            v => v,
+        };
+
+        let max_distance = a.radius + b.radius;
+        if distance.magnitude_squared() >= max_distance.powi(2) {
+            continue  // No collision.
+        }
+
+        let displacement_unit = distance.try_normalize(0.0).unwrap();
+        let displacement = displacement_unit * (max_distance - distance.magnitude());
+        a.position += 0.5 * displacement;
+        b.position += -0.5 * displacement;
+
+        let momentum = a.velocity.magnitude() + b.velocity.magnitude();
+        let elasticity = 4.0;
+        a.velocity = 0.5 * elasticity * momentum * displacement_unit;
+        b.velocity = -0.5 * elasticity * momentum * displacement_unit;
 
     }
+
+    // Apply player impulse.
+    for (_, player) in players.iter_mut() {
+        let acceleration = 64.0;
+        let max_velocity = 16.0;
+        let friction = 16.0;
+
+        // Acceleration ranges from `friction` to `friction + acceleration`,
+        // and is inversely proportional to the projection of the current velocity onto the input vector.
+        let acceleration_index = player.velocity.dot(&player.input) / max_velocity;
+        let acceleration_index = if acceleration_index < 0.0 { 0.0 } else { acceleration_index.sqrt() };
+        let adjusted_acceleration = friction + acceleration * (1.0 - acceleration_index);
+        player.velocity += adjusted_acceleration * dt * player.input;
+
+        let dampened_velocity_unclamped = player.velocity.magnitude() - dt * friction;
+        let dampened_velocity = if dampened_velocity_unclamped < 0.0 { 0.0 } else { dampened_velocity_unclamped };
+        let velocity_unit = player.velocity.try_normalize(0.0).unwrap_or(Vector2::new(0.0, 0.0));
+        player.velocity = dampened_velocity * velocity_unit;
+
+    }
+
+    for (_, player) in players.iter_mut() {
+        player.position += dt * player.velocity;
+    }
+
 }
 
 #[tokio::main]
@@ -201,6 +259,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 id: p.id,
                                 x: p.position.x as f32,
                                 y: p.position.y as f32,
+                                vx: p.velocity.x as f32,
+                                vy: p.velocity.y as f32,
+                                radius: p.radius as f32,
                             },
                         })).unwrap())
                     .collect();

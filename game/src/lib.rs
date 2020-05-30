@@ -10,6 +10,9 @@ pub struct Player {
     pub id: Id,
     pub x: f32,
     pub y: f32,
+    pub vx: f32,
+    pub vy: f32,
+    pub radius: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
