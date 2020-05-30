@@ -16,18 +16,14 @@ use game;
 #[derive(Debug)]
 struct Player {
 
-    id: game::Id,
+    player: game::Player,
 
     tcp_tx: Sender<game::TcpClientMessage>,
 
     random_bytes: [u8; game::NUM_RANDOM_BYTES],
     udp_addr: Option<SocketAddr>,
 
-    position: Vector2<f64>,
-    velocity: Vector2<f64>,
     input: Vector2<f64>,
-
-    radius: f64,
 
 }
 
@@ -37,14 +33,16 @@ fn accept(players: &mut Arena<Player>, stream: TcpStream, mut internal_tcp_tx: S
 
     let (tx, mut rx) = channel(4);
     let idx = match players.try_insert(Player {
+        player: game::Player {
+            id: 0,  // Set below.
+            radius: 1.0,
+            position: Vector2::new(0.0, 0.0),
+            velocity: Vector2::new(0.0, 0.0),
+        },
         tcp_tx: tx,
-        id: 0,  // Set below.
         udp_addr: None,
         random_bytes: rand::random(),
-        position: Vector2::new(0.0, 0.0),
-        velocity: Vector2::new(0.0, 0.0),
         input: Vector2::new(0.0, 0.0),
-        radius: 1.0,
     }) {
         Ok(idx) => idx,
         Err(_) => {
@@ -54,7 +52,7 @@ fn accept(players: &mut Arena<Player>, stream: TcpStream, mut internal_tcp_tx: S
     };
     // Set the user ID to the arena index.
     let id = idx.into_raw_parts().0 as u8;
-    players[idx].id = id;
+    players[idx].player.id = id;
 
     // TODO(jack) Broadcast PlayerLeft messages.
 
@@ -64,8 +62,8 @@ fn accept(players: &mut Arena<Player>, stream: TcpStream, mut internal_tcp_tx: S
         .filter(|(other_idx, _)| *other_idx != idx)
         .map(|(_, p)| p.tcp_tx.clone())
         .collect();
+    let msg = game::TcpClientMessage::PlayerJoined(players[idx].player);
     tokio::spawn(async move {
-        let msg = game::TcpClientMessage::PlayerJoined(game::PlayerJoined {id});
         let join_handles = tcp_txs
             .iter_mut()
             .map(|tcp_tx| tcp_tx.send(msg.clone()));
@@ -110,14 +108,8 @@ fn accept(players: &mut Arena<Player>, stream: TcpStream, mut internal_tcp_tx: S
 
     let present_players = players
         .iter()
-        .map(|(_, p)| game::Player {
-            id: p.id,
-            x: p.position.x as f32,
-            y: p.position.y as f32,
-            vx: p.velocity.x as f32,
-            vy: p.velocity.y as f32,
-            radius: p.radius as f32,
-        }).collect();
+        .map(|(_, p)| p.player)
+        .collect();
 
     tokio::spawn(async move {
 
@@ -174,25 +166,25 @@ fn step(players: &mut Arena<Player>, dt: f64) {
         let a = a.unwrap();
         let b = b.unwrap();
 
-        let distance = match a.position - b.position {
+        let distance = match a.player.position - b.player.position {
             v if v.x == 0.0 && v.y == 0.0 => Vector2::new(0.001, 0.001),
             v => v,
         };
 
-        let max_distance = a.radius + b.radius;
+        let max_distance = a.player.radius + b.player.radius;
         if distance.magnitude_squared() >= max_distance.powi(2) {
             continue  // No collision.
         }
 
         let displacement_unit = distance.try_normalize(0.0).unwrap();
         let displacement = displacement_unit * (max_distance - distance.magnitude());
-        a.position += 0.5 * displacement;
-        b.position += -0.5 * displacement;
+        a.player.position += 0.5 * displacement;
+        b.player.position += -0.5 * displacement;
 
-        let momentum = a.velocity.magnitude() + b.velocity.magnitude();
+        let momentum = a.player.velocity.magnitude() + b.player.velocity.magnitude();
         let elasticity = 2.0;
-        a.velocity = 0.5 * elasticity * momentum * displacement_unit;
-        b.velocity = -0.5 * elasticity * momentum * displacement_unit;
+        a.player.velocity = 0.5 * elasticity * momentum * displacement_unit;
+        b.player.velocity = -0.5 * elasticity * momentum * displacement_unit;
 
     }
 
@@ -204,20 +196,20 @@ fn step(players: &mut Arena<Player>, dt: f64) {
 
         // Acceleration ranges from `friction` to `friction + acceleration`,
         // and is inversely proportional to the projection of the current velocity onto the input vector.
-        let acceleration_index = player.velocity.dot(&player.input) / max_velocity;
+        let acceleration_index = player.player.velocity.dot(&player.input) / max_velocity;
         let acceleration_index = if acceleration_index < 0.0 { 0.0 } else { acceleration_index.sqrt() };
         let adjusted_acceleration = friction + acceleration * (1.0 - acceleration_index);
-        player.velocity += adjusted_acceleration * dt * player.input;
+        player.player.velocity += adjusted_acceleration * dt * player.input;
 
-        let dampened_velocity_unclamped = player.velocity.magnitude() - dt * friction;
+        let dampened_velocity_unclamped = player.player.velocity.magnitude() - dt * friction;
         let dampened_velocity = if dampened_velocity_unclamped < 0.0 { 0.0 } else { dampened_velocity_unclamped };
-        let velocity_unit = player.velocity.try_normalize(0.0).unwrap_or(Vector2::new(0.0, 0.0));
-        player.velocity = dampened_velocity * velocity_unit;
+        let velocity_unit = player.player.velocity.try_normalize(0.0).unwrap_or(Vector2::new(0.0, 0.0));
+        player.player.velocity = dampened_velocity * velocity_unit;
 
     }
 
     for (_, player) in players.iter_mut() {
-        player.position += dt * player.velocity;
+        player.player.position += dt * player.player.velocity;
     }
 
 }
@@ -264,14 +256,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     .map(|(_, p)| bincode::serialize(
                         &game::UdpClientMessage::PlayerUpdate(game::PlayerUpdate {
                             tick: tick.0,
-                            player: game::Player {
-                                id: p.id,
-                                x: p.position.x as f32,
-                                y: p.position.y as f32,
-                                vx: p.velocity.x as f32,
-                                vy: p.velocity.y as f32,
-                                radius: p.radius as f32,
-                            },
+                            player: p.player,
                         })).unwrap())
                     .collect();
                 for (_, player) in players.iter().filter(|(_, p)| p.udp_addr.is_some()) {
@@ -296,7 +281,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             recv_result = tcp_rx.recv() => match recv_result {
                 Some((idx, None)) => {
                     println!("disconnection!");
-                    let id = players[idx].id;
+                    let id = players[idx].player.id;
 
                     // Broadcast that a player left.
                     let mut tcp_txs: Vec<_> = players

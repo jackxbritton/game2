@@ -16,13 +16,6 @@ use tokio::time::interval;
 
 use game;
 
-struct Player {
-    id: game::Id,
-    position: Vector2<f64>,
-    velocity: Vector2<f64>,
-    radius: f64,
-}
-
 // TODO(jack) Remove the UDP channels and inline it in the main loop.
 // It's too slow.
 
@@ -58,12 +51,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let max_players = 16;
     let mut players = Arena::with_capacity(max_players);
     for player in &init.players {
-        players.insert(Player {
-            id: player.id,
-            position: Vector2::new(player.x as f64, player.y as f64),
-            velocity: Vector2::new(player.vx as f64, player.vy as f64),
-            radius: player.radius as f64,
-        });
+        players.insert(*player);
     }
     let (player_idx, _) = players.iter().find(|(_, p)| p.id == init.id).unwrap();
 
@@ -221,16 +209,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         // Read TCP and UDP messages.
         match tcp_rx.try_recv() {
             Ok(msg) => match msg {
-                game::TcpClientMessage::PlayerJoined(game::PlayerJoined { id }) => {
-                    if let Some((_, _)) = players.iter().find(|(_, p)| p.id == id) {
+                game::TcpClientMessage::PlayerJoined(player) => {
+                    if let Some((_, _)) = players.iter().find(|(_, p)| p.id == player.id) {
                         // TODO(jack) The player already exists, so initialize it.
                     } else {
-                        players.insert(Player {
-                            id,
-                            position: Vector2::new(0.0, 0.0),
-                            velocity: Vector2::new(0.0, 0.0),
-                            radius: 1.0,
-                        });
+                        players.insert(player);
                     }
                 },
                 game::TcpClientMessage::PlayerLeft(game::PlayerLeft { id }) => {
@@ -247,15 +230,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         loop {
             match udp_rx.try_recv() {
                 Ok(msg) => match msg {
-                    game::UdpClientMessage::PlayerUpdate(game::PlayerUpdate{ tick, player: game::Player { id, x, y, vx, vy, radius}}) => {
+                    game::UdpClientMessage::PlayerUpdate(game::PlayerUpdate{ tick, player }) => {
                         last_tick = tick;
-                        let (x, y, vx, vy) = (x as f64, y as f64, vx as f64, vy as f64);
-                        if let Some((_, player)) = players.iter_mut().find(|(_, p)| p.id == id) {
-                            player.position.x = x;
-                            player.position.y = y;
-                            player.velocity.x = vx;
-                            player.velocity.y = vy;
-                            player.radius = radius as f64;
+                        if let Some((_, p)) = players.iter_mut().find(|(_, p)| p.id == player.id) {
+                            *p = player;
                         }
                     },
                 },

@@ -1,4 +1,5 @@
-use serde::{Serialize, Deserialize};
+use nalgebra::Vector2;
+use serde::{de, Serializer, Serialize, Deserialize};
 use std::time::SystemTime;
 
 pub const NUM_RANDOM_BYTES: usize = 16;
@@ -6,14 +7,45 @@ pub const NUM_RANDOM_BYTES: usize = 16;
 pub type Id = u8;
 pub type Tick = u16;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+// TODO(jack) We're serializing f64s as f16s.
+// This can obviously be so much better, but it's ok for now.
+
+fn de_from_f16<'de, D>(deserializer: D) -> Result<f64, D::Error>
+    where D: de::Deserializer<'de>
+{
+    let f = <half::f16>::deserialize(deserializer)?;
+    Ok(f.to_f64())
+}
+
+fn se_to_f16<S>(f: &f64, serializer: S) -> Result<S::Ok, S::Error>
+    where S: Serializer
+{
+    half::f16::from_f64(*f).serialize(serializer)
+}
+
+fn de_from_vector2_f16<'de, D>(deserializer: D) -> Result<Vector2<f64>, D::Error>
+    where D: de::Deserializer<'de>
+{
+    let v = <Vector2<half::f16>>::deserialize(deserializer)?;
+    Ok(Vector2::new(v.x.to_f64(), v.y.to_f64()))
+}
+
+fn se_to_vector2_f16<S>(f: &Vector2<f64>, serializer: S) -> Result<S::Ok, S::Error>
+    where S: Serializer
+{
+    let v = Vector2::new(half::f16::from_f64(f.x), half::f16::from_f64(f.y));
+    v.serialize(serializer)
+}
+
+#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
 pub struct Player {
     pub id: Id,
-    pub x: f32,
-    pub y: f32,
-    pub vx: f32,
-    pub vy: f32,
-    pub radius: f32,
+    #[serde(serialize_with = "se_to_f16", deserialize_with = "de_from_f16")]
+    pub radius: f64,
+    #[serde(serialize_with = "se_to_vector2_f16", deserialize_with = "de_from_vector2_f16")]
+    pub position: Vector2<f64>,
+    #[serde(serialize_with = "se_to_vector2_f16", deserialize_with = "de_from_vector2_f16")]
+    pub velocity: Vector2<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,11 +77,6 @@ pub struct PlayerInput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlayerJoined {
-    pub id: Id,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlayerLeft {
     pub id: Id,
 }
@@ -57,7 +84,7 @@ pub struct PlayerLeft {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TcpClientMessage {
     Init(ClientInit),
-    PlayerJoined(PlayerJoined),
+    PlayerJoined(Player),
     PlayerLeft(PlayerLeft),
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]

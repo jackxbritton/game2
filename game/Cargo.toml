@@ -6,6 +6,6 @@ edition = "2018"
 
 [dependencies]
 generational-arena = "0.2"
-half = "1.6.0"
-nalgebra = "0.20"
+half = { version = "1.6.0", features = ["serde"] }
+nalgebra = { version = "0.20", features = ["serde-serialize"] }
 serde = { version = "1.0", features = ["derive"] }
