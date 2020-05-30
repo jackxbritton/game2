@@ -48,7 +48,7 @@ pub struct Player {
     pub velocity: Vector2<f64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
 pub struct PlayerUpdate {
     pub tick: Tick,
     pub player: Player,
@@ -60,6 +60,7 @@ pub struct ClientInit {
     pub id: Id,
     pub random_bytes: [u8; NUM_RANDOM_BYTES],
     pub players: Vec<Player>,
+    pub tick_rate: u8,
     pub tick_zero: SystemTime,
 }
 
@@ -77,15 +78,10 @@ pub struct PlayerInput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PlayerLeft {
-    pub id: Id,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TcpClientMessage {
     Init(ClientInit),
-    PlayerJoined(Player),
-    PlayerLeft(PlayerLeft),
+    PlayerJoined(PlayerUpdate),
+    PlayerLeft(Id),
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TcpServerMessage {

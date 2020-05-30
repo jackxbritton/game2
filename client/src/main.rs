@@ -1,5 +1,4 @@
 use generational_arena::Arena;
-use nalgebra::Vector2;
 use sdl2::event::Event;
 use sdl2::gfx::primitives::DrawRenderer;
 use sdl2::keyboard::Keycode;
@@ -16,8 +15,13 @@ use tokio::time::interval;
 
 use game;
 
-// TODO(jack) Remove the UDP channels and inline it in the main loop.
-// It's too slow.
+// TODO(jack) Track player state across multiple ticks and do interpolation.
+// Prediction for the player is next.
+
+struct Player {
+    most_recent_update: game::PlayerUpdate,
+    second_most_recent_update: Option<game::PlayerUpdate>,
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -47,13 +51,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
         _ => panic!("Received unexpected message from server!"),
     };
 
+    // Compute the current tick. TODO(jack)
+    let current_tick = 0;
+
     // Declare players arena.
     let max_players = 16;
     let mut players = Arena::with_capacity(max_players);
     for player in &init.players {
-        players.insert(*player);
+        players.insert(Player {
+            most_recent_update: game::PlayerUpdate {
+                tick: current_tick,
+                player: *player,
+            },
+            second_most_recent_update: None,
+        });
     }
-    let (player_idx, _) = players.iter().find(|(_, p)| p.id == init.id).unwrap();
+    let (player_idx, _) = players.iter().find(|(_, p)| p.most_recent_update.player.id == init.id).unwrap();
 
     // Open the UDP socket and ping the init message back until we get a response.
     let mut udp_socket = UdpSocket::bind("0.0.0.0:0").await?;
@@ -184,8 +197,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let (mut gup, mut gleft, mut gdown, mut gright) = (false, false, false, false);
 
-    let mut last_tick = 0;
-
     'game: loop {
         for event in event_pump.poll_iter() {
 
@@ -209,16 +220,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
         // Read TCP and UDP messages.
         match tcp_rx.try_recv() {
             Ok(msg) => match msg {
-                game::TcpClientMessage::PlayerJoined(player) => {
-                    if let Some((_, _)) = players.iter().find(|(_, p)| p.id == player.id) {
+                game::TcpClientMessage::PlayerJoined(update) => {
+                    if let Some((_, _)) = players.iter().find(|(_, p)| p.most_recent_update.player.id == update.player.id) {
                         // TODO(jack) The player already exists, so initialize it.
                     } else {
-                        players.insert(player);
+                        players.insert(Player {
+                            most_recent_update: update,
+                            second_most_recent_update: None,
+                        });
                     }
                 },
-                game::TcpClientMessage::PlayerLeft(game::PlayerLeft { id }) => {
-                    if let Some((idx, _)) = players.iter().find(|(_, p)| p.id == id) {
-                        println!("dropping player {}", players[idx].id);
+                game::TcpClientMessage::PlayerLeft(id) => {
+                    if let Some((idx, _)) = players.iter().find(|(_, p)| p.most_recent_update.player.id == id) {
+                        println!("dropping player {}", players[idx].most_recent_update.player.id);
                         players.remove(idx);
                     }
                 },
@@ -230,10 +244,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         loop {
             match udp_rx.try_recv() {
                 Ok(msg) => match msg {
-                    game::UdpClientMessage::PlayerUpdate(game::PlayerUpdate{ tick, player }) => {
-                        last_tick = tick;
-                        if let Some((_, p)) = players.iter_mut().find(|(_, p)| p.id == player.id) {
-                            *p = player;
+                    game::UdpClientMessage::PlayerUpdate(update) => {
+                        if let Some((_, p)) = players.iter_mut().find(|(_, p)| p.most_recent_update.player.id == update.player.id) {
+                            p.second_most_recent_update = Some(p.most_recent_update);
+                            p.most_recent_update = update;
                         }
                     },
                 },
@@ -262,11 +276,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 Color::RGB(255, 0, 0)
             };
             let scale = 40.0;
-            canvas.filled_circle((player.position.x * scale) as i16, (player.position.y * scale) as i16, (player.radius * scale) as i16, color)?;
+            canvas.filled_circle(
+                (player.most_recent_update.player.position.x * scale) as i16,
+                (player.most_recent_update.player.position.y * scale) as i16,
+                (player.most_recent_update.player.radius * scale) as i16,
+                color,
+            )?;
         }
 
         let surface = font
-            .render(&format!("({:.1}, {:.1})", players[player_idx].velocity.x, players[player_idx].velocity.y))
+            .render(&format!(
+                "({:.1}, {:.1})",
+                players[player_idx].most_recent_update.player.velocity.x,
+                players[player_idx].most_recent_update.player.velocity.y,
+            ))
             .blended(Color::RGB(255, 255, 255))?;
         let texture = texture_creator.create_texture_from_surface(&surface)?;
         canvas.copy(&texture, None, Rect::new(0, 0, surface.width(), surface.height()))?;

@@ -27,7 +27,7 @@ struct Player {
 
 }
 
-fn accept(players: &mut Arena<Player>, stream: TcpStream, mut internal_tcp_tx: Sender<(Index, Option<game::TcpServerMessage>)>, tick_zero: SystemTime) {
+fn accept(players: &mut Arena<Player>, stream: TcpStream, mut internal_tcp_tx: Sender<(Index, Option<game::TcpServerMessage>)>, tick_rate: u32, tick_zero: SystemTime, tick: game::Tick) {
 
     println!("connection!");
 
@@ -62,7 +62,10 @@ fn accept(players: &mut Arena<Player>, stream: TcpStream, mut internal_tcp_tx: S
         .filter(|(other_idx, _)| *other_idx != idx)
         .map(|(_, p)| p.tcp_tx.clone())
         .collect();
-    let msg = game::TcpClientMessage::PlayerJoined(players[idx].player);
+    let msg = game::TcpClientMessage::PlayerJoined(game::PlayerUpdate {
+        tick,
+        player: players[idx].player,
+    });
     tokio::spawn(async move {
         let join_handles = tcp_txs
             .iter_mut()
@@ -120,6 +123,7 @@ fn accept(players: &mut Arena<Player>, stream: TcpStream, mut internal_tcp_tx: S
             id,
             random_bytes,
             players: present_players,
+            tick_rate: tick_rate as u8,
             tick_zero,
         })).unwrap();
         if let Err(err) = writer.write_all(&bytes[..]).await {
@@ -270,7 +274,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             },
 
             accept_result = tcp_listener.accept() => match accept_result {
-                Ok((stream, _)) => accept(&mut players, stream, tcp_tx.clone(), tick_zero.clone()),
+                Ok((stream, _)) => accept(&mut players, stream, tcp_tx.clone(), tick_rate, tick_zero, tick.0),
                 Err(err) => {
                     eprintln!("{}", err);
                     break
@@ -290,8 +294,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         .map(|(_, p)| p.tcp_tx.clone())
                         .collect();
                     tokio::spawn(async move {
-                        // let bytes = bincode::serialize(&game::TcpClientMessage::PlayerLeft(game::PlayerLeft {id})).unwrap();
-                        let msg = game::TcpClientMessage::PlayerLeft(game::PlayerLeft {id});
+                        let msg = game::TcpClientMessage::PlayerLeft(id);
                         let join_handles = tcp_txs
                             .iter_mut()
                             .map(|tcp_tx| tcp_tx.send(msg.clone())); // TODO(jack) Can we do this without allocations?
