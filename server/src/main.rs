@@ -82,87 +82,85 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             },
 
-            accept_result = tcp_listener.accept() => {
-                match accept_result {
-                    Ok(_) if players.len() >= max_players => println!("rejecting connection; too many players"),
-                    Ok((stream, _)) => {
+            accept_result = tcp_listener.accept() => match accept_result {
+                Ok(_) if players.len() >= max_players => println!("rejecting connection; too many players"),
+                Ok((stream, _)) => {
 
-                        println!("connection!");
+                    println!("connection!");
 
-                        let (tx, mut rx) = channel(4);
-                        let idx = players.insert(Player {
-                            tcp_tx: tx,
-                            udp_addr: None,
-                            random_bytes: rand::random(),
-                            position: Vector2::new(0.0, 0.0),
-                            velocity: Vector2::new(0.0, 0.0),
-                            input: Vector2::new(0.0, 0.0),
-                        });
+                    let (tx, mut rx) = channel(4);
+                    let idx = players.insert(Player {
+                        tcp_tx: tx,
+                        udp_addr: None,
+                        random_bytes: rand::random(),
+                        position: Vector2::new(0.0, 0.0),
+                        velocity: Vector2::new(0.0, 0.0),
+                        input: Vector2::new(0.0, 0.0),
+                    });
 
-                        // Start tasks to read-from / write-to the TCP socket.
+                    // Start tasks to read-from / write-to the TCP socket.
 
-                        let (mut reader, mut writer) = stream.into_split();
+                    let (mut reader, mut writer) = stream.into_split();
 
-                        let mut tcp_tx = tcp_tx.clone();
-                        tokio::spawn(async move {
-                            const MAX_PACKET_SIZE_PLUS_ONE: usize = 64;
-                            let mut buf: [u8; MAX_PACKET_SIZE_PLUS_ONE] = [0; MAX_PACKET_SIZE_PLUS_ONE];
-                            loop {
-                                match reader.read(&mut buf).await {
-                                    Ok(0) => break,
-                                    Ok(MAX_PACKET_SIZE_PLUS_ONE) => break,
-                                    Ok(num_bytes) => match tcp_tx.send((idx, buf[..num_bytes].to_owned())).await {
-                                        Ok(_) => (),
-                                        Err(_) => break,
-                                    },
-                                    Err(err) => {
-                                        eprintln!("{}", err);
+                    let mut tcp_tx = tcp_tx.clone();
+                    tokio::spawn(async move {
+                        const MAX_PACKET_SIZE_PLUS_ONE: usize = 64;
+                        let mut buf: [u8; MAX_PACKET_SIZE_PLUS_ONE] = [0; MAX_PACKET_SIZE_PLUS_ONE];
+                        loop {
+                            match reader.read(&mut buf).await {
+                                Ok(0) => break,
+                                Ok(MAX_PACKET_SIZE_PLUS_ONE) => break,
+                                Ok(num_bytes) => match tcp_tx.send((idx, buf[..num_bytes].to_owned())).await {
+                                    Ok(_) => (),
+                                    Err(_) => break,
+                                },
+                                Err(err) => {
+                                    eprintln!("{}", err);
+                                    break
+                                }
+                            };
+                        }
+                        // One consequence of every client publishing TCP packets to the same channel
+                        // is that we don't know when any one disconnects.
+                        // For now, we'll send an empty vec down the channel.
+                        tcp_tx.send((idx, Vec::new())).await.ok();
+                    });
+
+                    let random_bytes = players[idx].random_bytes.clone();
+                    println!("{:?}", random_bytes);
+
+                    tokio::spawn(async move {
+
+                        // Send the init packet.
+                        // For now, this will just include a random sequence of bytes.
+                        // We'll then wait for the random sequence of bytes via UDP to identify the client's external port number.
+                        let bytes = bincode::serialize(&game::TcpClientMessage::Init(game::Init {
+                            random_bytes,
+                        })).unwrap();
+                        if let Err(err) = writer.write_all(&bytes[..]).await {
+                            eprintln!("{}", err);
+                            return
+                        }
+                        println!("wrote init message");
+
+                        loop {
+                            match rx.recv().await {
+                                Some(msg) => {
+                                    let bytes = bincode::serialize(&msg).unwrap();
+                                    if let Err(_) = writer.write_all(&bytes[..]).await {
                                         break
                                     }
-                                };
-                            }
-                            // One consequence of every client publishing TCP packets to the same channel
-                            // is that we don't know when any one disconnects.
-                            // For now, we'll send an empty vec down the channel.
-                            tcp_tx.send((idx, Vec::new())).await.ok();
-                        });
+                                },
+                                None => break,
+                            };
+                        }
+                    });
 
-                        let random_bytes = players[idx].random_bytes.clone();
-                        println!("{:?}", random_bytes);
-
-                        tokio::spawn(async move {
-
-                            // Send the init packet.
-                            // For now, this will just include a random sequence of bytes.
-                            // We'll then wait for the random sequence of bytes via UDP to identify the client's external port number.
-                            let bytes = bincode::serialize(&game::TcpClientMessage::Init(game::Init {
-                                random_bytes,
-                            })).unwrap();
-                            if let Err(err) = writer.write_all(&bytes[..]).await {
-                                eprintln!("{}", err);
-                                return
-                            }
-                            println!("wrote init message");
-
-                            loop {
-                                match rx.recv().await {
-                                    Some(msg) => {
-                                        let bytes = bincode::serialize(&msg).unwrap();
-                                        if let Err(_) = writer.write_all(&bytes[..]).await {
-                                            break
-                                        }
-                                    },
-                                    None => break,
-                                };
-                            }
-                        });
-
-                    },
-                    Err(err) => {
-                        eprintln!("{}", err);
-                        break
-                    },
-                }
+                },
+                Err(err) => {
+                    eprintln!("{}", err);
+                    break
+                },
             },
 
             recv_result = tcp_rx.recv() => match recv_result {

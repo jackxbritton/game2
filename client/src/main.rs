@@ -14,7 +14,7 @@ use game;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    // TODO(jack)
+
     // Connect with the server.
 
     let addr = "127.0.0.1:5000";
@@ -35,7 +35,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     };
 
     // Open the UDP socket and ping the init message back until we get a response.
-    let mut udp_socket = UdpSocket::bind("127.0.0.1:5001").await?;
+    let mut udp_socket = UdpSocket::bind("127.0.0.1:0").await?;
     udp_socket.connect(addr).await?;
     let mut ticker = interval(Duration::from_secs(1));
     loop {
@@ -164,42 +164,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     'game: loop {
         for event in event_pump.poll_iter() {
-            match event {
-                Event::Quit { .. } => break 'game,
-                Event::KeyDown {
-                    keycode: Some(Keycode::W),
-                    ..
-                } => gup = true,
-                Event::KeyUp {
-                    keycode: Some(Keycode::W),
-                    ..
-                } => gup = false,
-                Event::KeyDown {
-                    keycode: Some(Keycode::A),
-                    ..
-                } => gleft = true,
-                Event::KeyUp {
-                    keycode: Some(Keycode::A),
-                    ..
-                } => gleft = false,
-                Event::KeyDown {
-                    keycode: Some(Keycode::S),
-                    ..
-                } => gdown = true,
-                Event::KeyUp {
-                    keycode: Some(Keycode::S),
-                    ..
-                } => gdown = false,
-                Event::KeyDown {
-                    keycode: Some(Keycode::D),
-                    ..
-                } => gright = true,
-                Event::KeyUp {
-                    keycode: Some(Keycode::D),
-                    ..
-                } => gright = false,
+
+            let keycode_and_on = match event {
+                Event::KeyDown { keycode: Some(keycode), .. } => Some((keycode, true)),
+                Event::KeyUp { keycode: Some(keycode), .. } => Some((keycode, false)),
+                _ => None,
+            };
+
+            match (event, keycode_and_on) {
+                (_, Some((Keycode::W, on))) => gup = on,
+                (_, Some((Keycode::A, on))) => gleft = on,
+                (_, Some((Keycode::S, on))) => gdown = on,
+                (_, Some((Keycode::D, on))) => gright = on,
+                (Event::Quit {..}, _) => break 'game,
                 _ => (),
             };
+
         }
 
         // Read TCP and UDP messages.

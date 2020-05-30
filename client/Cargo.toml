@@ -17,4 +17,3 @@ tokio = { version = "0.2", features = ["full"] }
 version = "0.34"
 default-features = false
 features = ["gfx"]
-
