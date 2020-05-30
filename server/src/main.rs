@@ -31,7 +31,7 @@ struct Player {
 
 }
 
-fn accept(players: &mut Arena<Player>, stream: TcpStream, mut internal_tcp_tx: Sender<(Index, Vec<u8>)>) {
+fn accept(players: &mut Arena<Player>, stream: TcpStream, mut internal_tcp_tx: Sender<(Index, Option<game::TcpServerMessage>)>) {
 
     println!("connection!");
 
@@ -77,13 +77,20 @@ fn accept(players: &mut Arena<Player>, stream: TcpStream, mut internal_tcp_tx: S
     let (mut reader, mut writer) = stream.into_split();
 
     tokio::spawn(async move {
-        const MAX_PACKET_SIZE_PLUS_ONE: usize = 64;
-        let mut buf: [u8; MAX_PACKET_SIZE_PLUS_ONE] = [0; MAX_PACKET_SIZE_PLUS_ONE];
         loop {
-            match reader.read(&mut buf).await {
+            const MAX_PACKET_SIZE_PLUS_ONE: usize = 64;
+            let mut buf: [u8; MAX_PACKET_SIZE_PLUS_ONE] = [0; MAX_PACKET_SIZE_PLUS_ONE];
+            let num_bytes = match reader.read(&mut buf).await {
                 Ok(0) => break,
                 Ok(MAX_PACKET_SIZE_PLUS_ONE) => break,
-                Ok(num_bytes) => match internal_tcp_tx.send((idx, buf[..num_bytes].to_owned())).await {
+                Err(err) => {
+                    eprintln!("{}", err);
+                    break
+                }
+                Ok(num_bytes) => num_bytes,
+            };
+            match bincode::deserialize(&buf[..num_bytes]) {
+                Ok(msg) => match internal_tcp_tx.send((idx, Some(msg))).await {
                     Ok(_) => (),
                     Err(_) => break,
                 },
@@ -95,8 +102,8 @@ fn accept(players: &mut Arena<Player>, stream: TcpStream, mut internal_tcp_tx: S
         }
         // One consequence of every client publishing TCP packets to the same channel
         // is that we don't know when any one disconnects.
-        // For now, we'll send an empty vec down the channel.
-        internal_tcp_tx.send((idx, Vec::new())).await.ok();
+        // We signal it here with a `None`.
+        internal_tcp_tx.send((idx, None)).await.ok();
     });
 
     let random_bytes = players[idx].random_bytes.clone();
@@ -182,7 +189,7 @@ fn step(players: &mut Arena<Player>, dt: f64) {
         b.position += -0.5 * displacement;
 
         let momentum = a.velocity.magnitude() + b.velocity.magnitude();
-        let elasticity = 4.0;
+        let elasticity = 2.0;
         a.velocity = 0.5 * elasticity * momentum * displacement_unit;
         b.velocity = -0.5 * elasticity * momentum * displacement_unit;
 
@@ -285,7 +292,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             // TODO(jack) TCP messages from the client should end up in a channel.
             recv_result = tcp_rx.recv() => match recv_result {
-                Some((idx, bytes)) if bytes.len() == 0 => {
+                Some((idx, None)) => {
                     println!("disconnection!");
                     let id = players[idx].id;
 
@@ -306,7 +313,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     players.remove(idx);
 
                 },
-                Some((idx, bytes)) => println!("{:?}: {}", idx, from_utf8(&bytes[..]).unwrap_or("invalid utf-8 :(")),
+                Some((idx, Some(msg))) => println!("{:?}: {:?}", idx, msg),
                 None => break,
             },
 

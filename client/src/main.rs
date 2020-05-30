@@ -173,7 +173,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     });
 
     // Write a dummy message to the server.
-    tcp_tx.try_send(&game::TcpServerMessage::Test("hi"))?;
+    tcp_tx.try_send(&game::TcpServerMessage::Test(4))?;
 
     let sdl = sdl2::init()?;
     let sdl_video = sdl.video()?;

@@ -58,9 +58,9 @@ pub enum TcpClientMessage {
     PlayerJoined(PlayerJoined),
     PlayerLeft(PlayerLeft),
 }
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TcpServerMessage {
-    Test(&'static str),
+    Test(u8),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
