@@ -3,12 +3,19 @@ use serde::{Serialize, Deserialize};
 pub const NUM_RANDOM_BYTES: usize = 16;
 
 pub type Id = u8;
+pub type Tick = u16;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Player {
     pub id: Id,
     pub x: f32,
     pub y: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlayerUpdate {
+    pub player: Player,
+    pub tick: Tick,
 }
 
 // TODO(jack) ClientInit should be split into a handshake message and a game init message.
@@ -55,7 +62,7 @@ pub enum TcpServerMessage {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum UdpClientMessage {
-    Player(Player),
+    PlayerUpdate(PlayerUpdate),
 }
 
 #[derive(Debug, Serialize, Deserialize)]

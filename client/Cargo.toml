@@ -16,4 +16,5 @@ tokio = { version = "0.2", features = ["full"] }
 [dependencies.sdl2]
 version = "0.34"
 default-features = false
-features = ["gfx", "static-link", "use-pkgconfig"]
+# features = ["gfx", "static-link", "use-pkgconfig"]
+features = ["gfx", "ttf"]

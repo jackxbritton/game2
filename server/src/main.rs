@@ -3,6 +3,7 @@ use generational_arena::{Arena, Index};
 use nalgebra::Vector2;
 use std::error::Error;
 use std::net::SocketAddr;
+use std::num::Wrapping;
 use std::str::from_utf8;
 use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
@@ -19,7 +20,7 @@ struct Player {
 
     id: game::Id,
 
-    tcp_tx: Sender<Vec<u8>>,
+    tcp_tx: Sender<game::TcpClientMessage>,
 
     random_bytes: [u8; game::NUM_RANDOM_BYTES],
     udp_addr: Option<SocketAddr>,
@@ -55,16 +56,16 @@ fn accept(players: &mut Arena<Player>, stream: TcpStream, mut internal_tcp_tx: S
     // TODO(jack) Broadcast PlayerLeft messages.
 
     // Broadcast PlayerJoined messages.
-    let mut tcp_txs: Vec<Sender<Vec<u8>>> = players
+    let mut tcp_txs: Vec<_> = players
         .iter()
         .filter(|(other_idx, _)| *other_idx != idx)
         .map(|(_, p)| p.tcp_tx.clone())
         .collect();
     tokio::spawn(async move {
-        let bytes = bincode::serialize(&game::TcpClientMessage::PlayerJoined(game::PlayerJoined {id})).unwrap();
+        let msg = game::TcpClientMessage::PlayerJoined(game::PlayerJoined {id});
         let join_handles = tcp_txs
             .iter_mut()
-            .map(|tcp_tx| tcp_tx.send(bytes.clone()));
+            .map(|tcp_tx| tcp_tx.send(msg.clone()));
         join_all(join_handles).await;
     });
 
@@ -117,8 +118,8 @@ fn accept(players: &mut Arena<Player>, stream: TcpStream, mut internal_tcp_tx: S
 
         loop {
             match rx.recv().await {
-                Some(bytes) => {
-                    if let Err(_) = writer.write_all(&bytes[..]).await {
+                Some(msg) => {
+                    if let Err(_) = writer.write_all(bincode::serialize(&msg).unwrap().as_slice()).await {
                         break
                     }
                 },
@@ -172,10 +173,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // This means that each player holds a copy of tcp_tx which packets are passed to.
     let (tcp_tx, mut tcp_rx) = channel(4);
 
+    let mut tick = Wrapping(0);
+
     loop {
 
         const MAX_PACKET_SIZE_PLUS_ONE: usize = 64;
         let mut buf: [u8; MAX_PACKET_SIZE_PLUS_ONE] = [0; MAX_PACKET_SIZE_PLUS_ONE];
+
+        // TODO(jack) Redesign this select! call to execute as little code linearly as possible.
 
         tokio::select! {
 
@@ -190,18 +195,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     .iter()
                     .filter(|(_, p)| p.udp_addr.is_some())
                     .map(|(_, p)| bincode::serialize(
-                        &game::UdpClientMessage::Player(game::Player {
-                            id: p.id,
-                            x: p.position.x as f32,
-                            y: p.position.y as f32,
-                        }
-                    )).unwrap())
+                        &game::UdpClientMessage::PlayerUpdate(game::PlayerUpdate {
+                            tick: tick.0,
+                            player: game::Player {
+                                id: p.id,
+                                x: p.position.x as f32,
+                                y: p.position.y as f32,
+                            },
+                        })).unwrap())
                     .collect();
                 for (_, player) in players.iter().filter(|(_, p)| p.udp_addr.is_some()) {
                     for bytes in &msgs {
                         udp_socket.send_to(&bytes, player.udp_addr.unwrap()).await?;
                     }
                 }
+
+                tick = tick + Wrapping(1);
 
             },
 
@@ -218,19 +227,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 Some((idx, bytes)) if bytes.len() == 0 => {
                     println!("disconnection!");
                     let id = players[idx].id;
-                    let mut tcp_txs: Vec<Sender<Vec<u8>>> = players
+
+                    // Broadcast that a player left.
+                    let mut tcp_txs: Vec<_> = players
                         .iter()
                         .filter(|(other_idx, _)| *other_idx != idx)
                         .map(|(_, p)| p.tcp_tx.clone())
                         .collect();
                     tokio::spawn(async move {
-                        let bytes = bincode::serialize(&game::TcpClientMessage::PlayerLeft(game::PlayerLeft {id})).unwrap();
+                        // let bytes = bincode::serialize(&game::TcpClientMessage::PlayerLeft(game::PlayerLeft {id})).unwrap();
+                        let msg = game::TcpClientMessage::PlayerLeft(game::PlayerLeft {id});
                         let join_handles = tcp_txs
                             .iter_mut()
-                            .map(|tcp_tx| tcp_tx.send(bytes.clone())); // TODO(jack) Can we do this without allocations?
+                            .map(|tcp_tx| tcp_tx.send(msg.clone())); // TODO(jack) Can we do this without allocations?
                         join_all(join_handles).await;
                     });
                     players.remove(idx);
+
                 },
                 Some((idx, bytes)) => println!("{:?}: {}", idx, from_utf8(&bytes[..]).unwrap_or("invalid utf-8 :(")),
                 None => break,

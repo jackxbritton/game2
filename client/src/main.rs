@@ -4,6 +4,8 @@ use sdl2::event::Event;
 use sdl2::gfx::primitives::DrawRenderer;
 use sdl2::keyboard::Keycode;
 use sdl2::pixels::Color;
+use sdl2::rect::Rect;
+use std::env::args;
 use std::error::Error;
 use std::time::Duration;
 use tokio::net::{TcpStream, UdpSocket};
@@ -11,7 +13,6 @@ use tokio::prelude::*;
 use tokio::sync::mpsc::channel;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::time::interval;
-use std::env;
 
 use game;
 
@@ -28,15 +29,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Connect with the server.
 
-    let args: Vec<String> = env::args().collect();
-    if args.len() != 2 {
-        eprintln!("Usage: {} HOST:PORT", args[0]);
-        return Ok(())
-    }
-    let addr = &args[1];
+    let addr = match args().nth(1) {
+        Some(addr) => addr,
+        None => {
+            eprintln!("Usage: {} HOST:PORT", args().nth(0).unwrap());
+            return Ok(())
+        },
+    };
 
     println!("Connecting to {}...", addr);
-    let mut tcp_stream = TcpStream::connect(addr).await?;
+    let mut tcp_stream = TcpStream::connect(&addr).await?;
 
     println!("Waiting for init message...");
     const MAX_PACKET_SIZE_PLUS_ONE: usize = 256;
@@ -54,7 +56,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let max_players = 16;
     let mut players = Arena::with_capacity(max_players);
     for player in &init.players {
-        println!("a: {}", player.id);
         players.insert(Player {
             id: player.id,
             position: Vector2::new(player.x as f64, player.y as f64),
@@ -182,9 +183,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .present_vsync()
         .build()?;
 
+    // TODO(jack) Load a font.
+    let sdl_ttf = sdl2::ttf::init()?;
+    let texture_creator = canvas.texture_creator();
+    let font = sdl_ttf.load_font("/usr/share/fonts/gsfonts/URWGothic-BookOblique.otf", 128)?;
+
     let mut event_pump = sdl.event_pump()?;
 
     let (mut gup, mut gleft, mut gdown, mut gright) = (false, false, false, false);
+
+    let mut last_tick = 0;
 
     'game: loop {
         for event in event_pump.poll_iter() {
@@ -213,7 +221,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     if let Some((_, _)) = players.iter().find(|(_, p)| p.id == id) {
                         // TODO(jack) Initialize the player.
                     } else {
-                        println!("b: {}", id);
                         players.insert(Player {
                             id,
                             position: Vector2::new(0.0, 0.0),
@@ -234,7 +241,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         loop {
             match udp_rx.try_recv() {
                 Ok(msg) => match msg {
-                    game::UdpClientMessage::Player(game::Player { id, x, y}) => {
+                    game::UdpClientMessage::PlayerUpdate(game::PlayerUpdate{ tick, player: game::Player { id, x, y}}) => {
+                        last_tick = tick;
                         let (x, y) = (x as f64, y as f64);
                         if let Some((_, player)) = players.iter_mut().find(|(_, p)| p.id == id) {
                             player.position.x = x;
@@ -248,7 +256,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
 
         // Send input.
-        let msg = game::UdpServerMessage::PlayerInput(game::PlayerInput {up: gup.clone(), left: gleft.clone(), down: gdown.clone(), right: gright.clone()});
+        let msg = game::UdpServerMessage::PlayerInput(game::PlayerInput {up: gup, left: gleft, down: gdown, right: gright});
         match udp_writer.send(bincode::serialize(&msg).unwrap().as_slice()).await {
             Ok(_) => (),
             Err(err) => {
@@ -268,6 +276,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
             };
             canvas.filled_circle((player.position.x * 800.0) as i16, (player.position.y * 800.0) as i16, 40, color)?;
         }
+
+        let surface = font
+            .render(&format!("hello there\n{}", last_tick))
+            .blended(Color::RGB(255, 255, 255))?;
+        let texture = texture_creator.create_texture_from_surface(&surface)?;
+        canvas.copy(&texture, None, Rect::new(0, 0, surface.width(), surface.height()))?;
 
         canvas.present();
     }
