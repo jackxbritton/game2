@@ -111,7 +111,7 @@ fn accept(players: &mut Arena<Player>, stream: TcpStream, mut internal_tcp_tx: S
 
     let present_players = players
         .iter()
-        .map(|(_, p)| p.player)
+        .map(|(_, p)| game::PlayerUpdate { tick, player: p.player })
         .collect();
 
     tokio::spawn(async move {
@@ -224,7 +224,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let max_players = 16;
     let mut players: Arena<Player> = Arena::with_capacity(max_players);
 
-    let tick_rate = 60;
+    let tick_rate = 10;
     let tick_period = Duration::from_secs(1) / tick_rate;
     let mut ticker = interval(tick_period);
 
@@ -248,6 +248,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         tokio::select! {
 
             _ = ticker.tick() => {
+
+                println!(
+                    "{} {:.2}",
+                    tick,
+                    SystemTime::now().duration_since(tick_zero)?.as_secs_f64() % (1.0 / tick_rate as f64),
+                );
 
                 // Update game state.
                 let dt = 1.0 / tick_rate as f64; // TODO(jack) Measure actual elapsed time.

@@ -1,4 +1,5 @@
 use generational_arena::Arena;
+use std::time::SystemTime;
 use sdl2::event::Event;
 use sdl2::gfx::primitives::DrawRenderer;
 use sdl2::keyboard::Keycode;
@@ -14,9 +15,6 @@ use tokio::sync::mpsc::error::TryRecvError;
 use tokio::time::interval;
 
 use game;
-
-// TODO(jack) Track player state across multiple ticks and do interpolation.
-// Prediction for the player is next.
 
 struct Player {
     most_recent_update: game::PlayerUpdate,
@@ -51,18 +49,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
         _ => panic!("Received unexpected message from server!"),
     };
 
-    // Compute the current tick. TODO(jack)
-    let current_tick = 0;
-
     // Declare players arena.
     let max_players = 16;
     let mut players = Arena::with_capacity(max_players);
-    for player in &init.players {
+    for update in &init.players {
         players.insert(Player {
-            most_recent_update: game::PlayerUpdate {
-                tick: current_tick,
-                player: *player,
-            },
+            most_recent_update: *update,
             second_most_recent_update: None,
         });
     }
@@ -82,7 +74,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
 
     // We're in! Launch separate tasks to read TCP and UDP.
-    // TODO(jack) This is super slow. I may want to move away from tokio.
 
     let (mut internal_tcp_tx, mut tcp_rx) = channel(4);
     let (mut tcp_tx, mut internal_tcp_rx) = channel(4);
@@ -188,7 +179,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .present_vsync()
         .build()?;
 
-    // TODO(jack) Load a font.
+    // Load a font.
     let sdl_ttf = sdl2::ttf::init()?;
     let texture_creator = canvas.texture_creator();
     let font = sdl_ttf.load_font("/usr/share/fonts/gsfonts/URWGothic-BookOblique.otf", 128)?;
@@ -196,6 +187,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut event_pump = sdl.event_pump()?;
 
     let (mut gup, mut gleft, mut gdown, mut gright) = (false, false, false, false);
+
+    // TODO(jack) Synchronize tick_dt_counter.
+    // There must be at least one player (the current player).
+    let tick_period = 1.0 / init.tick_rate as f64;
+    let mut current_time = SystemTime::now();
+
+    let duration_since_tick_zero = current_time
+        .duration_since(init.tick_zero)?;
+    let mut tick = duration_since_tick_zero.as_nanos() / (tick_period * 1e9) as u128;
+    let mut tick_dt_counter = duration_since_tick_zero.as_secs_f64() % tick_period;
 
     'game: loop {
         for event in event_pump.poll_iter() {
@@ -222,7 +223,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             Ok(msg) => match msg {
                 game::TcpClientMessage::PlayerJoined(update) => {
                     if let Some((_, _)) = players.iter().find(|(_, p)| p.most_recent_update.player.id == update.player.id) {
-                        // TODO(jack) The player already exists, so initialize it.
+                        // TODO(jack) The player already exists (created by a UDP event?), so initialize it.
                     } else {
                         players.insert(Player {
                             most_recent_update: update,
@@ -245,15 +246,34 @@ async fn main() -> Result<(), Box<dyn Error>> {
             match udp_rx.try_recv() {
                 Ok(msg) => match msg {
                     game::UdpClientMessage::PlayerUpdate(update) => {
-                        if let Some((_, p)) = players.iter_mut().find(|(_, p)| p.most_recent_update.player.id == update.player.id) {
-                            p.second_most_recent_update = Some(p.most_recent_update);
-                            p.most_recent_update = update;
+
+                        let player = match players.iter_mut().find(|(_, p)| p.most_recent_update.player.id == update.player.id) {
+                            Some((_, p)) => p,
+                            None => continue,
+                        };
+
+                        if update.tick <= player.most_recent_update.tick {
+                            continue
                         }
+
+                        player.second_most_recent_update = Some(player.most_recent_update);
+                        player.most_recent_update = update;
+
                     },
                 },
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Closed) => break 'game,
             }
+        }
+
+        let now = SystemTime::now();
+        let dt = now.duration_since(current_time)?.as_secs_f64();
+        current_time = now;
+
+        tick_dt_counter += dt;
+        if tick_dt_counter >= tick_period {
+            tick_dt_counter %= tick_period;
+            tick += 1;
         }
 
         // Send input.
@@ -275,10 +295,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
             } else {
                 Color::RGB(255, 0, 0)
             };
+            let position = if let Some(second_most_recent_update) = player.second_most_recent_update {
+                let num_ticks = player.most_recent_update.tick - second_most_recent_update.tick;
+                let mix_unclamped = ((tick as i32 - second_most_recent_update.tick as i32 - 1) as f64 + tick_dt_counter / tick_period) / num_ticks as f64;
+                let mix = if mix_unclamped < 0.0 { 0.0 } else if mix_unclamped > 1.0 { 1.0 } else { mix_unclamped };
+                mix * player.most_recent_update.player.position + (1.0 - mix) * second_most_recent_update.player.position
+            } else {
+                player.most_recent_update.player.position
+            };
             let scale = 40.0;
             canvas.filled_circle(
-                (player.most_recent_update.player.position.x * scale) as i16,
-                (player.most_recent_update.player.position.y * scale) as i16,
+                (position.x * scale) as i16,
+                (position.y * scale) as i16,
                 (player.most_recent_update.player.radius * scale) as i16,
                 color,
             )?;
@@ -286,9 +314,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         let surface = font
             .render(&format!(
-                "({:.1}, {:.1})",
-                players[player_idx].most_recent_update.player.velocity.x,
-                players[player_idx].most_recent_update.player.velocity.y,
+                "{} {}",
+                players[player_idx].most_recent_update.tick,
+                tick, 
             ))
             .blended(Color::RGB(255, 255, 255))?;
         let texture = texture_creator.create_texture_from_surface(&surface)?;

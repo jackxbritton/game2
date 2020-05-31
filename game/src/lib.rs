@@ -59,7 +59,7 @@ pub struct PlayerUpdate {
 pub struct ClientInit {
     pub id: Id,
     pub random_bytes: [u8; NUM_RANDOM_BYTES],
-    pub players: Vec<Player>,
+    pub players: Vec<PlayerUpdate>,
     pub tick_rate: u8,
     pub tick_zero: SystemTime,
 }
