@@ -1,5 +1,3 @@
-use generational_arena::Arena;
-use std::time::SystemTime;
 use sdl2::event::Event;
 use sdl2::gfx::primitives::DrawRenderer;
 use sdl2::keyboard::Keycode;
@@ -8,6 +6,7 @@ use sdl2::rect::Rect;
 use std::env::args;
 use std::error::Error;
 use std::time::Duration;
+use std::time::SystemTime;
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::prelude::*;
 use tokio::sync::mpsc::channel;
@@ -16,9 +15,8 @@ use tokio::time::interval;
 
 use game;
 
-struct Player {
-    most_recent_update: game::PlayerUpdate,
-    second_most_recent_update: Option<game::PlayerUpdate>,
+struct World {
+    updates: [game::WorldUpdate; 2],
 }
 
 #[tokio::main]
@@ -50,15 +48,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
     };
 
     // Declare players arena.
-    let max_players = 16;
-    let mut players = Arena::with_capacity(max_players);
-    for update in &init.players {
-        players.insert(Player {
-            most_recent_update: *update,
-            second_most_recent_update: None,
-        });
-    }
-    let (player_idx, _) = players.iter().find(|(_, p)| p.most_recent_update.player.id == init.id).unwrap();
+    let mut world = World {
+        updates: [
+            game::WorldUpdate { tick: 0, players: vec![] },
+            game::WorldUpdate { tick: 0, players: vec![] },
+        ],
+    };
+    let player_id = init.id;
 
     // Open the UDP socket and ping the init message back until we get a response.
     let mut udp_socket = UdpSocket::bind("0.0.0.0:0").await?;
@@ -188,15 +184,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let (mut gup, mut gleft, mut gdown, mut gright) = (false, false, false, false);
 
-    // TODO(jack) Synchronize tick_dt_counter.
-    // There must be at least one player (the current player).
     let tick_period = 1.0 / init.tick_rate as f64;
     let mut current_time = SystemTime::now();
 
     let duration_since_tick_zero = current_time
         .duration_since(init.tick_zero)?;
-    let mut tick = duration_since_tick_zero.as_nanos() / (tick_period * 1e9) as u128;
     let mut tick_dt_counter = duration_since_tick_zero.as_secs_f64() % tick_period;
+
+    let mut tick = duration_since_tick_zero.as_nanos() / (tick_period * 1e9) as u128;
 
     'game: loop {
         for event in event_pump.poll_iter() {
@@ -221,21 +216,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         // Read TCP and UDP messages.
         match tcp_rx.try_recv() {
             Ok(msg) => match msg {
-                game::TcpClientMessage::PlayerJoined(update) => {
-                    if let Some((_, _)) = players.iter().find(|(_, p)| p.most_recent_update.player.id == update.player.id) {
-                        // TODO(jack) The player already exists (created by a UDP event?), so initialize it.
-                    } else {
-                        players.insert(Player {
-                            most_recent_update: update,
-                            second_most_recent_update: None,
-                        });
-                    }
+                game::TcpClientMessage::PlayerJoined(id) => {
+                    println!("player joined: {}", id);
                 },
                 game::TcpClientMessage::PlayerLeft(id) => {
-                    if let Some((idx, _)) = players.iter().find(|(_, p)| p.most_recent_update.player.id == id) {
-                        println!("dropping player {}", players[idx].most_recent_update.player.id);
-                        players.remove(idx);
-                    }
+                    println!("player left: {}", id);
                 },
                 _ => eprintln!("received unknown message from server: {:?}", msg),
             },
@@ -245,19 +230,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         loop {
             match udp_rx.try_recv() {
                 Ok(msg) => match msg {
-                    game::UdpClientMessage::PlayerUpdate(update) => {
+                    game::UdpClientMessage::WorldUpdate(update) => {
 
-                        let player = match players.iter_mut().find(|(_, p)| p.most_recent_update.player.id == update.player.id) {
-                            Some((_, p)) => p,
-                            None => continue,
-                        };
-
-                        if update.tick <= player.most_recent_update.tick {
-                            continue
-                        }
-
-                        player.second_most_recent_update = Some(player.most_recent_update);
-                        player.most_recent_update = update;
+                        // Sort the update into the world updates.
+                        let mut updates = Vec::with_capacity(world.updates.len() + 1);
+                        updates.push(update);
+                        updates.extend_from_slice(&world.updates);
+                        updates.sort_unstable_by_key(|w| w.tick);
+                        world.updates.clone_from_slice(&updates[1..]);
 
                     },
                 },
@@ -289,25 +269,31 @@ async fn main() -> Result<(), Box<dyn Error>> {
         canvas.set_draw_color(Color::RGB(0, 0, 0));
         canvas.clear();
 
-        for (idx, player) in players.iter() {
-            let color = if idx == player_idx {
+        let num_ticks = world.updates[1].tick - world.updates[0].tick;
+        let mix_unclamped = ((tick as i32 - world.updates[0].tick as i32 - 1) as f64 + tick_dt_counter / tick_period) / num_ticks as f64;
+        let mix = if mix_unclamped < 0.0 { 0.0 } else if mix_unclamped > 1.0 { 1.0 } else { mix_unclamped };
+
+        for player in &world.updates[1].players {
+            let color = if player.id == player_id {
                 Color::RGB(255, 255, 255)
             } else {
                 Color::RGB(255, 0, 0)
             };
-            let position = if let Some(second_most_recent_update) = player.second_most_recent_update {
-                let num_ticks = player.most_recent_update.tick - second_most_recent_update.tick;
-                let mix_unclamped = ((tick as i32 - second_most_recent_update.tick as i32 - 1) as f64 + tick_dt_counter / tick_period) / num_ticks as f64;
-                let mix = if mix_unclamped < 0.0 { 0.0 } else if mix_unclamped > 1.0 { 1.0 } else { mix_unclamped };
-                mix * player.most_recent_update.player.position + (1.0 - mix) * second_most_recent_update.player.position
-            } else {
-                player.most_recent_update.player.position
+            let previous_player = match world.updates[0].players.iter().find(|p| p.id == player.id) {
+                Some(p) => p,
+                None => player,
             };
+
+            let position = mix * player.position + (1.0 - mix) * previous_player.position;
+            let radius = mix * player.radius + (1.0 - mix) * previous_player.radius;
+
             let scale = 40.0;
+            let position = position * scale;
+            let radius = radius * scale;
             canvas.filled_circle(
-                (position.x * scale) as i16,
-                (position.y * scale) as i16,
-                (player.most_recent_update.player.radius * scale) as i16,
+                position.x as i16,
+                position.y as i16,
+                radius as i16,
                 color,
             )?;
         }
@@ -315,7 +301,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let surface = font
             .render(&format!(
                 "{} {}",
-                players[player_idx].most_recent_update.tick,
+                world.updates[1].tick,
                 tick, 
             ))
             .blended(Color::RGB(255, 255, 255))?;

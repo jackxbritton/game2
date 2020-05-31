@@ -62,10 +62,7 @@ fn accept(players: &mut Arena<Player>, stream: TcpStream, mut internal_tcp_tx: S
         .filter(|(other_idx, _)| *other_idx != idx)
         .map(|(_, p)| p.tcp_tx.clone())
         .collect();
-    let msg = game::TcpClientMessage::PlayerJoined(game::PlayerUpdate {
-        tick,
-        player: players[idx].player,
-    });
+    let msg = game::TcpClientMessage::PlayerJoined(id);
     tokio::spawn(async move {
         let join_handles = tcp_txs
             .iter_mut()
@@ -109,10 +106,10 @@ fn accept(players: &mut Arena<Player>, stream: TcpStream, mut internal_tcp_tx: S
 
     let random_bytes = players[idx].random_bytes.clone();
 
-    let present_players = players
-        .iter()
-        .map(|(_, p)| game::PlayerUpdate { tick, player: p.player })
-        .collect();
+    let update = game::WorldUpdate {
+        tick,
+        players: players.iter().map(|(_, p)| p.player).collect(),
+    };
 
     tokio::spawn(async move {
 
@@ -122,7 +119,7 @@ fn accept(players: &mut Arena<Player>, stream: TcpStream, mut internal_tcp_tx: S
         let bytes = bincode::serialize(&game::TcpClientMessage::Init(game::ClientInit {
             id,
             random_bytes,
-            players: present_players,
+            update,
             tick_rate: tick_rate as u8,
             tick_zero,
         })).unwrap();
@@ -260,19 +257,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 step(&mut players, dt);
 
                 // Broadcast.
-                let msgs: Vec<_> = players
-                    .iter()
-                    .filter(|(_, p)| p.udp_addr.is_some())
-                    .map(|(_, p)| bincode::serialize(
-                        &game::UdpClientMessage::PlayerUpdate(game::PlayerUpdate {
-                            tick: tick.0,
-                            player: p.player,
-                        })).unwrap())
-                    .collect();
+                let update = game::WorldUpdate {
+                    tick: tick.0,
+                    players: players.iter().map(|(_, p)| p.player).collect(),
+                };
+                let bytes = bincode::serialize(&game::UdpClientMessage::WorldUpdate(update)).unwrap();
                 for (_, player) in players.iter().filter(|(_, p)| p.udp_addr.is_some()) {
-                    for bytes in &msgs {
-                        udp_socket.send_to(&bytes, player.udp_addr.unwrap()).await?;
-                    }
+                    udp_socket.send_to(&bytes, player.udp_addr.unwrap()).await?;
                 }
 
                 tick = tick + Wrapping(1);

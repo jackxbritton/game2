@@ -48,10 +48,10 @@ pub struct Player {
     pub velocity: Vector2<f64>,
 }
 
-#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
-pub struct PlayerUpdate {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorldUpdate {
     pub tick: Tick,
-    pub player: Player,
+    pub players: Vec<Player>,
 }
 
 // TODO(jack) ClientInit should be split into a handshake message and a game init message.
@@ -59,7 +59,7 @@ pub struct PlayerUpdate {
 pub struct ClientInit {
     pub id: Id,
     pub random_bytes: [u8; NUM_RANDOM_BYTES],
-    pub players: Vec<PlayerUpdate>,
+    pub update: WorldUpdate,
     pub tick_rate: u8,
     pub tick_zero: SystemTime,
 }
@@ -80,7 +80,7 @@ pub struct PlayerInput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TcpClientMessage {
     Init(ClientInit),
-    PlayerJoined(PlayerUpdate),
+    PlayerJoined(Id),  // Could add more initialization in the future.
     PlayerLeft(Id),
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,7 +90,7 @@ pub enum TcpServerMessage {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum UdpClientMessage {
-    PlayerUpdate(PlayerUpdate),
+    WorldUpdate(WorldUpdate),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
