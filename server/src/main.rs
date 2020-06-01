@@ -24,6 +24,7 @@ struct Player {
     udp_addr: Option<SocketAddr>,
 
     input: Vector2<f64>,
+    angle: f64,
 
 }
 
@@ -43,6 +44,7 @@ fn accept(players: &mut Arena<Player>, stream: TcpStream, mut internal_tcp_tx: S
         udp_addr: None,
         random_bytes: rand::random(),
         input: Vector2::new(0.0, 0.0),
+        angle: 0.0,
     }) {
         Ok(idx) => idx,
         Err(_) => {
@@ -120,7 +122,7 @@ fn accept(players: &mut Arena<Player>, stream: TcpStream, mut internal_tcp_tx: S
             id,
             random_bytes,
             update,
-            tick_rate: tick_rate as u8,
+            tick_period: Duration::from_secs(1) / tick_rate,
             tick_zero,
         })).unwrap();
         if let Err(err) = writer.write_all(&bytes[..]).await {
@@ -246,12 +248,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             _ = ticker.tick() => {
 
-                println!(
-                    "{} {:.2}",
-                    tick,
-                    SystemTime::now().duration_since(tick_zero)?.as_secs_f64() % (1.0 / tick_rate as f64),
-                );
-
                 // Update game state.
                 let dt = 1.0 / tick_rate as f64; // TODO(jack) Measure actual elapsed time.
                 step(&mut players, dt);
@@ -279,7 +275,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             },
 
             // TODO(jack) TCP messages from the client should end up in a channel.
-            recv_result = tcp_rx.recv() => match recv_result {
+            result = tcp_rx.recv() => match result {
                 Some((idx, None)) => {
                     println!("disconnection!");
                     let id = players[idx].player.id;
@@ -304,7 +300,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 None => break,
             },
 
-            recv_from_result = udp_socket.recv_from(&mut buf) => match recv_from_result {
+            result = udp_socket.recv_from(&mut buf) => match result {
                 Ok((0, _)) => break,
                 Ok((MAX_PACKET_SIZE_PLUS_ONE, _)) => break,
                 Ok((num_bytes, socket_addr)) => {
@@ -326,15 +322,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 println!("{:?}", player.udp_addr);
                             }
                         },
-                        game::UdpServerMessage::PlayerInput(game::PlayerInput {up, left, down, right}) => {
+                        game::UdpServerMessage::PlayerInput(inputs) => {
                             let (_, player) = match players.iter_mut().find(|(_, player)| player.udp_addr.is_some() && player.udp_addr.unwrap() == socket_addr) {
                                 Some((idx, player)) => (idx, player),
                                 None => continue,
                             };
+                            // TODO(jack) Apply the inputs according to their tick.
+                            // Right now, we're just taking the most recent one.
+                            if inputs.len() == 0 {
+                                continue
+                            }
+                            let input = inputs.iter().last().unwrap();
                             player.input = Vector2::new(
-                                (right as i32 - left as i32) as f64,
-                                (down as i32 - up as i32) as f64,
+                                (input.right as i32 - input.left as i32) as f64,
+                                (input.down as i32 - input.up as i32) as f64,
                             ).try_normalize(0.0).unwrap_or(Vector2::new(0.0, 0.0));
+
+                            player.angle = input.angle;
+
                         },
                     };
 

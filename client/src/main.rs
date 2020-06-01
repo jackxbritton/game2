@@ -1,3 +1,4 @@
+use nalgebra::Vector2;
 use sdl2::event::Event;
 use sdl2::gfx::primitives::DrawRenderer;
 use sdl2::keyboard::Keycode;
@@ -51,7 +52,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut world = World {
         updates: [
             game::WorldUpdate { tick: 0, players: vec![] },
-            game::WorldUpdate { tick: 0, players: vec![] },
+            init.update,
         ],
     };
     let player_id = init.id;
@@ -160,6 +161,58 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     });
 
+    let tick_period = init.tick_period;
+    let mut tick = SystemTime::now().duration_since(init.tick_zero)?.as_nanos() / (tick_period.as_secs_f64() * 1e9) as u128;
+
+    // Send input over UDP at a separate input rate.
+    let (mut input_tx, mut internal_input_rx) = channel(32);
+    tokio::spawn(async move {
+        let mut inputs = Vec::new();
+        let (mut tick_interval, mut input_interval) = (
+            interval(tick_period),
+            interval(tick_period),  // TODO(jack) Haven't really figured this out yet.
+        );
+        loop {
+            tokio::select! {
+                _ = tick_interval.tick() => {
+                    // Sample player input.
+                    let last_input = (0..)
+                        .map(|_| match internal_input_rx.try_recv() {
+                            Ok(input) => Some(Ok(input)),
+                            Err(TryRecvError::Empty) => None,
+                            Err(TryRecvError::Closed) => Some(Err(TryRecvError::Closed)),
+                        })
+                        .take_while(|x: &Option<Result<game::PlayerInput, TryRecvError>>| x.is_some())
+                        .map(|x| x.unwrap())
+                        .last();
+                    let mut input = match last_input {
+                        None => continue,
+                        Some(Ok(input)) => input,
+                        Some(Err(_)) => break,
+                    };
+                    input.tick = tick as u16;
+                    inputs.push(input);
+                    tick += 1;
+                },
+                _ = input_interval.tick() => {
+                    if inputs.len() == 0 {
+                        continue
+                    }
+                    let msg = game::UdpServerMessage::PlayerInput(inputs.clone());
+                    let bytes = bincode::serialize(&msg).unwrap();
+                    inputs.clear();
+                    match udp_writer.send(&bytes).await {
+                        Ok(_) => (),
+                        Err(err) => {
+                            eprintln!("{}", err);
+                            return
+                        }
+                    }
+                }
+            }
+        }
+    });
+
     // Write a dummy message to the server.
     tcp_tx.try_send(&game::TcpServerMessage::Test(4))?;
 
@@ -182,9 +235,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let mut event_pump = sdl.event_pump()?;
 
-    let (mut gup, mut gleft, mut gdown, mut gright) = (false, false, false, false);
+    let mut input = game::PlayerInput {
+        tick: 0,
+        up: false, left: false, down: false, right: false,
+        angle: 0.0,
+    };
 
-    let tick_period = 1.0 / init.tick_rate as f64;
+    let tick_period = tick_period.as_secs_f64();
     let mut current_time = SystemTime::now();
 
     let duration_since_tick_zero = current_time
@@ -192,6 +249,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut tick_dt_counter = duration_since_tick_zero.as_secs_f64() % tick_period;
 
     let mut tick = duration_since_tick_zero.as_nanos() / (tick_period * 1e9) as u128;
+
+    let scale = 40.0;
 
     'game: loop {
         for event in event_pump.poll_iter() {
@@ -203,10 +262,32 @@ async fn main() -> Result<(), Box<dyn Error>> {
             };
 
             match (event, keycode_and_on) {
-                (_, Some((Keycode::W, on))) => gup = on,
-                (_, Some((Keycode::A, on))) => gleft = on,
-                (_, Some((Keycode::S, on))) => gdown = on,
-                (_, Some((Keycode::D, on))) => gright = on,
+                (_, Some((Keycode::W, on))) => input.up = on,
+                (_, Some((Keycode::A, on))) => input.left = on,
+                (_, Some((Keycode::S, on))) => input.down = on,
+                (_, Some((Keycode::D, on))) => input.right = on,
+                (Event::MouseMotion {x, y, ..}, _) => {
+
+                    // Do player lerp.
+                    // It's necessary to know the player position for the mouse position.
+                    let num_ticks = world.updates[1].tick - world.updates[0].tick;
+                    let mix_unclamped = ((tick as i32 - world.updates[0].tick as i32 - 1) as f64 + tick_dt_counter / tick_period) / num_ticks as f64;
+                    let position = world.updates[1].players.iter().find(|p| p.id == player_id).unwrap().position;
+                    let positions = [
+                        world.updates[0].players.iter()
+                            .find(|p| p.id == player_id)
+                            .map(|p| p.position)
+                            .unwrap_or(position),
+                        position,
+                    ];
+                    let mix = if mix_unclamped < 0.0 { 0.0 } else if mix_unclamped > 1.0 { 1.0 } else { mix_unclamped };
+                    let player_position = mix * positions[1] + (1.0 - mix) * positions[0];
+
+                    let mouse = Vector2::new(x as f64 / scale, y as f64 / scale);
+                    let diff = mouse - player_position;
+                    input.angle = diff.y.atan2(diff.x);
+
+                },
                 (Event::Quit {..}, _) => break 'game,
                 _ => (),
             };
@@ -254,17 +335,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         if tick_dt_counter >= tick_period {
             tick_dt_counter %= tick_period;
             tick += 1;
+            input.tick = tick as u16;
         }
 
         // Send input.
-        let msg = game::UdpServerMessage::PlayerInput(game::PlayerInput {up: gup, left: gleft, down: gdown, right: gright});
-        match udp_writer.send(bincode::serialize(&msg).unwrap().as_slice()).await {
-            Ok(_) => (),
-            Err(err) => {
-                eprintln!("{}", err);
-                break
-            }
-        };
+        input_tx.send(input).await?;
 
         canvas.set_draw_color(Color::RGB(0, 0, 0));
         canvas.clear();
@@ -287,7 +362,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
             let position = mix * player.position + (1.0 - mix) * previous_player.position;
             let radius = mix * player.radius + (1.0 - mix) * previous_player.radius;
 
-            let scale = 40.0;
             let position = position * scale;
             let radius = radius * scale;
             canvas.filled_circle(

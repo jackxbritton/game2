@@ -1,6 +1,6 @@
 use nalgebra::Vector2;
 use serde::{de, Serializer, Serialize, Deserialize};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 pub const NUM_RANDOM_BYTES: usize = 16;
 
@@ -60,7 +60,7 @@ pub struct ClientInit {
     pub id: Id,
     pub random_bytes: [u8; NUM_RANDOM_BYTES],
     pub update: WorldUpdate,
-    pub tick_rate: u8,
+    pub tick_period: Duration,
     pub tick_zero: SystemTime,
 }
 
@@ -69,12 +69,15 @@ pub struct ServerInit {
     pub random_bytes: [u8; NUM_RANDOM_BYTES],
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
 pub struct PlayerInput {
+    pub tick: Tick,
     pub up: bool,
     pub left: bool,
     pub down: bool,
     pub right: bool,
+    #[serde(serialize_with = "se_to_f16", deserialize_with = "de_from_f16")]
+    pub angle: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,5 +99,5 @@ pub enum UdpClientMessage {
 #[derive(Debug, Serialize, Deserialize)]
 pub enum UdpServerMessage {
     Init(ServerInit),
-    PlayerInput(PlayerInput),
+    PlayerInput(Vec<PlayerInput>),
 }
