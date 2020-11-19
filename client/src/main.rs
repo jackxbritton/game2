@@ -2,6 +2,7 @@ use nalgebra::Vector2;
 use sdl2::event::Event;
 use sdl2::gfx::primitives::DrawRenderer;
 use sdl2::keyboard::Keycode;
+use sdl2::mouse::MouseButton;
 use sdl2::pixels::Color;
 use sdl2::rect::Rect;
 use std::env::args;
@@ -37,7 +38,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut tcp_stream = TcpStream::connect(&addr).await?;
 
     println!("Waiting for init message...");
-    const MAX_PACKET_SIZE_PLUS_ONE: usize = 256;
+    const MAX_PACKET_SIZE_PLUS_ONE: usize = 4096;
     let mut buf: [u8; MAX_PACKET_SIZE_PLUS_ONE] = [0; MAX_PACKET_SIZE_PLUS_ONE];
     let num_bytes = tcp_stream.read(&mut buf).await?;
 
@@ -51,7 +52,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // Declare players arena.
     let mut world = World {
         updates: [
-            game::WorldUpdate { tick: 0, players: vec![] },
+            game::WorldUpdate { tick: 0, players: vec![], bullets: vec![] },
             init.update,
         ],
     };
@@ -113,7 +114,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         loop {
             match udp_reader.recv(&mut buf).await {
                 Ok(0) => break,
-                Ok(MAX_PACKET_SIZE_PLUS_ONE) => break,
+                Ok(MAX_PACKET_SIZE_PLUS_ONE) => {
+                    eprintln!("packet too big for buffer!");
+                    break;
+                },
                 Ok(num_bytes) => {
                     // Send the message down the internal channel.
                     let udp_message: game::UdpClientMessage = match bincode::deserialize(&buf[..num_bytes]) {
@@ -123,6 +127,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             break
                         }
                     };
+                    // TODO(jack) When these messages get too big, everything crashes.
+                    // It doesn't matter what gets sent down the channel.
                     match internal_udp_tx.send(udp_message).await {
                         Ok(_) => (),
                         Err(err) => {
@@ -161,17 +167,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     });
 
-    let tick_period = init.tick_period;
+    let tick_period = Duration::from_secs(1) / init.tick_rate as u32;
     let mut tick = SystemTime::now().duration_since(init.tick_zero)?.as_nanos() / (tick_period.as_secs_f64() * 1e9) as u128;
 
     // Send input over UDP at a separate input rate.
     let (mut input_tx, mut internal_input_rx) = channel(32);
     tokio::spawn(async move {
         let mut inputs = Vec::new();
-        let (mut tick_interval, mut input_interval) = (
-            interval(tick_period),
-            interval(tick_period),  // TODO(jack) Haven't really figured this out yet.
-        );
+        let mut tick_interval = interval(tick_period);
+        let mut input_interval = interval(Duration::from_secs(1) / 60);  // TODO(jack) Haven't really figured this out yet.
         loop {
             tokio::select! {
                 _ = tick_interval.tick() => {
@@ -238,6 +242,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let mut input = game::PlayerInput {
         tick: 0,
         up: false, left: false, down: false, right: false,
+        mouse_left: false, mouse_right: false,
         angle: 0.0,
     };
 
@@ -248,28 +253,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .duration_since(init.tick_zero)?;
     let mut tick_dt_counter = duration_since_tick_zero.as_secs_f64() % tick_period;
 
-    let mut tick = duration_since_tick_zero.as_nanos() / (tick_period * 1e9) as u128;
+    let mut tick = (duration_since_tick_zero.as_nanos() / (tick_period * 1e9) as u128) as u16;
 
     let scale = 40.0;
 
     'game: loop {
         for event in event_pump.poll_iter() {
 
-            let keycode_and_on = match event {
-                Event::KeyDown { keycode: Some(keycode), .. } => Some((keycode, true)),
-                Event::KeyUp { keycode: Some(keycode), .. } => Some((keycode, false)),
-                _ => None,
-            };
-
-            match (event, keycode_and_on) {
-                (_, Some((Keycode::W, on))) => input.up = on,
-                (_, Some((Keycode::A, on))) => input.left = on,
-                (_, Some((Keycode::S, on))) => input.down = on,
-                (_, Some((Keycode::D, on))) => input.right = on,
-                (Event::MouseMotion {x, y, ..}, _) => {
+            match event {
+                Event::Quit {..} => break 'game,
+                Event::MouseButtonDown { mouse_btn: MouseButton::Left, .. } => input.mouse_left = true,
+                Event::MouseButtonDown { mouse_btn: MouseButton::Right, .. } => input.mouse_right = true,
+                Event::MouseButtonUp { mouse_btn: MouseButton::Left, .. } => input.mouse_left = false,
+                Event::MouseButtonUp { mouse_btn: MouseButton::Right, .. } => input.mouse_right = false,
+                Event::MouseMotion {x, y, ..} => {
 
                     // Do player lerp.
                     // It's necessary to know the player position for the mouse position.
+                    // TODO(jack) We should only bother with this for the final mouse motion event in the pump. 
                     let num_ticks = world.updates[1].tick - world.updates[0].tick;
                     let mix_unclamped = ((tick as i32 - world.updates[0].tick as i32 - 1) as f64 + tick_dt_counter / tick_period) / num_ticks as f64;
                     let position = world.updates[1].players.iter().find(|p| p.id == player_id).unwrap().position;
@@ -288,9 +289,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     input.angle = diff.y.atan2(diff.x);
 
                 },
-                (Event::Quit {..}, _) => break 'game,
                 _ => (),
             };
+
+            let keycode_and_on = match event {
+                Event::KeyDown { keycode: Some(keycode), .. } => Some((keycode, true)),
+                Event::KeyUp { keycode: Some(keycode), .. } => Some((keycode, false)),
+                _ => None,
+            };
+
+            match keycode_and_on {
+                Some((Keycode::W, on)) => input.up = on,
+                Some((Keycode::A, on)) => input.left = on,
+                Some((Keycode::S, on)) => input.down = on,
+                Some((Keycode::D, on)) => input.right = on,
+                _ => (),
+            }
 
         }
 
@@ -345,7 +359,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         canvas.clear();
 
         let num_ticks = world.updates[1].tick - world.updates[0].tick;
-        let mix_unclamped = ((tick as i32 - world.updates[0].tick as i32 - 1) as f64 + tick_dt_counter / tick_period) / num_ticks as f64;
+        let mix_unclamped = ((tick as i32 - world.updates[0].tick as i32 - num_ticks as i32) as f64 + tick_dt_counter / tick_period) / num_ticks as f64;
         let mix = if mix_unclamped < 0.0 { 0.0 } else if mix_unclamped > 1.0 { 1.0 } else { mix_unclamped };
 
         for player in &world.updates[1].players {
@@ -361,6 +375,30 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             let position = mix * player.position + (1.0 - mix) * previous_player.position;
             let radius = mix * player.radius + (1.0 - mix) * previous_player.radius;
+
+            let position = position * scale;
+            let radius = radius * scale;
+            canvas.filled_circle(
+                position.x as i16,
+                position.y as i16,
+                radius as i16,
+                color,
+            )?;
+        }
+
+        for bullet in &world.updates[1].bullets {
+            let color = if bullet.player_id == player_id {
+                Color::RGB(255, 255, 255)
+            } else {
+                Color::RGB(255, 0, 0)
+            };
+            let previous_bullet = match world.updates[0].bullets.iter().find(|b| b.id == bullet.id) {
+                Some(b) => b,
+                None => bullet,
+            };
+
+            let position = mix * bullet.position + (1.0 - mix) * previous_bullet.position;
+            let radius = mix * bullet.radius + (1.0 - mix) * previous_bullet.radius;
 
             let position = position * scale;
             let radius = radius * scale;

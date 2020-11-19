@@ -1,10 +1,11 @@
 use nalgebra::Vector2;
 use serde::{de, Serializer, Serialize, Deserialize};
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 pub const NUM_RANDOM_BYTES: usize = 16;
 
-pub type Id = u8;
+pub type PlayerId = u8;
+pub type BulletId = u16;
 pub type Tick = u16;
 
 // TODO(jack) We're serializing f64s as f16s.
@@ -39,7 +40,7 @@ fn se_to_vector2_f16<S>(f: &Vector2<f64>, serializer: S) -> Result<S::Ok, S::Err
 
 #[derive(Debug, Copy, Clone, Serialize, Deserialize)]
 pub struct Player {
-    pub id: Id,
+    pub id: PlayerId,
     #[serde(serialize_with = "se_to_f16", deserialize_with = "de_from_f16")]
     pub radius: f64,
     #[serde(serialize_with = "se_to_vector2_f16", deserialize_with = "de_from_vector2_f16")]
@@ -48,19 +49,32 @@ pub struct Player {
     pub velocity: Vector2<f64>,
 }
 
+#[derive(Debug, Copy, Clone, Serialize, Deserialize)]
+pub struct Bullet {
+    pub id: BulletId,
+    pub player_id: PlayerId,
+    #[serde(serialize_with = "se_to_vector2_f16", deserialize_with = "de_from_vector2_f16")]
+    pub position: Vector2<f64>,
+    #[serde(serialize_with = "se_to_f16", deserialize_with = "de_from_f16")]
+    pub angle: f64,
+    #[serde(serialize_with = "se_to_f16", deserialize_with = "de_from_f16")]
+    pub radius: f64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorldUpdate {
     pub tick: Tick,
     pub players: Vec<Player>,
+    pub bullets: Vec<Bullet>,
 }
 
 // TODO(jack) ClientInit should be split into a handshake message and a game init message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClientInit {
-    pub id: Id,
+    pub id: PlayerId,
     pub random_bytes: [u8; NUM_RANDOM_BYTES],
     pub update: WorldUpdate,
-    pub tick_period: Duration,
+    pub tick_rate: u8,
     pub tick_zero: SystemTime,
 }
 
@@ -76,6 +90,8 @@ pub struct PlayerInput {
     pub left: bool,
     pub down: bool,
     pub right: bool,
+    pub mouse_left: bool,
+    pub mouse_right: bool,
     #[serde(serialize_with = "se_to_f16", deserialize_with = "de_from_f16")]
     pub angle: f64,
 }
@@ -83,8 +99,8 @@ pub struct PlayerInput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TcpClientMessage {
     Init(ClientInit),
-    PlayerJoined(Id),  // Could add more initialization in the future.
-    PlayerLeft(Id),
+    PlayerJoined(PlayerId),  // Could add more initialization in the future.
+    PlayerLeft(PlayerId),
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TcpServerMessage {

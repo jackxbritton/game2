@@ -1,11 +1,12 @@
 use futures::future::join_all;
 use generational_arena::{Arena, Index};
-use std::time::SystemTime;
 use nalgebra::Vector2;
+use std::env::args;
 use std::error::Error;
 use std::net::SocketAddr;
 use std::num::Wrapping;
 use std::time::Duration;
+use std::time::SystemTime;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::prelude::*;
 use tokio::sync::mpsc::{channel, Sender};
@@ -15,7 +16,6 @@ use game;
 
 #[derive(Debug)]
 struct Player {
-
     player: game::Player,
 
     tcp_tx: Sender<game::TcpClientMessage>,
@@ -25,17 +25,32 @@ struct Player {
 
     input: Vector2<f64>,
     angle: f64,
-
+    firing: bool,
+    fire_counter: f64,
 }
 
-fn accept(players: &mut Arena<Player>, stream: TcpStream, mut internal_tcp_tx: Sender<(Index, Option<game::TcpServerMessage>)>, tick_rate: u32, tick_zero: SystemTime, tick: game::Tick) {
+#[derive(Debug)]
+struct Bullet {
+    bullet: game::Bullet,
+    velocity: Vector2<f64>,
+    lifetime: f64,
+}
 
+fn accept(
+    players: &mut Arena<Player>,
+    bullets: &Arena<Bullet>,
+    stream: TcpStream,
+    mut internal_tcp_tx: Sender<(Index, Option<game::TcpServerMessage>)>,
+    tick_rate: u32,
+    tick_zero: SystemTime,
+    tick: game::Tick,
+) {
     println!("connection!");
 
     let (tx, mut rx) = channel(4);
     let idx = match players.try_insert(Player {
         player: game::Player {
-            id: 0,  // Set below.
+            id: 0, // Set below.
             radius: 1.0,
             position: Vector2::new(0.0, 0.0),
             velocity: Vector2::new(0.0, 0.0),
@@ -45,14 +60,16 @@ fn accept(players: &mut Arena<Player>, stream: TcpStream, mut internal_tcp_tx: S
         random_bytes: rand::random(),
         input: Vector2::new(0.0, 0.0),
         angle: 0.0,
+        firing: false,
+        fire_counter: 0.0,
     }) {
         Ok(idx) => idx,
         Err(_) => {
             println!("rejecting connection; too many players");
-            return
-        },
+            return;
+        }
     };
-    // Set the user ID to the arena index.
+    // Set the user ID to some combinaiton of the arena index and generation.
     let id = idx.into_raw_parts().0 as u8;
     players[idx].player.id = id;
 
@@ -66,9 +83,7 @@ fn accept(players: &mut Arena<Player>, stream: TcpStream, mut internal_tcp_tx: S
         .collect();
     let msg = game::TcpClientMessage::PlayerJoined(id);
     tokio::spawn(async move {
-        let join_handles = tcp_txs
-            .iter_mut()
-            .map(|tcp_tx| tcp_tx.send(msg.clone()));
+        let join_handles = tcp_txs.iter_mut().map(|tcp_tx| tcp_tx.send(msg.clone()));
         join_all(join_handles).await;
     });
 
@@ -85,7 +100,7 @@ fn accept(players: &mut Arena<Player>, stream: TcpStream, mut internal_tcp_tx: S
                 Ok(MAX_PACKET_SIZE_PLUS_ONE) => break,
                 Err(err) => {
                     eprintln!("{}", err);
-                    break
+                    break;
                 }
                 Ok(num_bytes) => num_bytes,
             };
@@ -96,7 +111,7 @@ fn accept(players: &mut Arena<Player>, stream: TcpStream, mut internal_tcp_tx: S
                 },
                 Err(err) => {
                     eprintln!("{}", err);
-                    break
+                    break;
                 }
             };
         }
@@ -111,10 +126,10 @@ fn accept(players: &mut Arena<Player>, stream: TcpStream, mut internal_tcp_tx: S
     let update = game::WorldUpdate {
         tick,
         players: players.iter().map(|(_, p)| p.player).collect(),
+        bullets: bullets.iter().map(|(_, b)| b.bullet).collect(),
     };
 
     tokio::spawn(async move {
-
         // Send the init packet.
         // For now, this will just include a random sequence of bytes.
         // We'll then wait for the random sequence of bytes via UDP to identify the client's external port number.
@@ -122,49 +137,123 @@ fn accept(players: &mut Arena<Player>, stream: TcpStream, mut internal_tcp_tx: S
             id,
             random_bytes,
             update,
-            tick_period: Duration::from_secs(1) / tick_rate,
+            tick_rate: tick_rate as u8,
             tick_zero,
-        })).unwrap();
+        }))
+        .unwrap();
         if let Err(err) = writer.write_all(&bytes[..]).await {
             eprintln!("{}", err);
-            return
+            return;
         }
         println!("wrote init message");
 
         loop {
             match rx.recv().await {
                 Some(msg) => {
-                    if let Err(_) = writer.write_all(bincode::serialize(&msg).unwrap().as_slice()).await {
-                        break
+                    if let Err(_) = writer
+                        .write_all(bincode::serialize(&msg).unwrap().as_slice())
+                        .await
+                    {
+                        break;
                     }
-                },
+                }
                 None => break,
             };
         }
     });
-
 }
 
-fn step(players: &mut Arena<Player>, dt: f64) {
+fn step(players: &mut Arena<Player>, bullets: &mut Arena<Bullet>, dt: f64) {
+    // Apply player impulse.
+    for (_, player) in players.iter_mut() {
+        let acceleration = 64.0;
+        let max_velocity = 16.0;
+        let friction = 16.0;
+
+        // Acceleration ranges from `friction` to `friction + acceleration`,
+        // and is inversely proportional to the projection of the current velocity onto the input vector.
+        let acceleration_index = player.player.velocity.dot(&player.input) / max_velocity;
+        let acceleration_index = if acceleration_index < 0.0 {
+            0.0
+        } else {
+            acceleration_index.sqrt()
+        };
+        let adjusted_acceleration = friction + acceleration * (1.0 - acceleration_index);
+        player.player.velocity += adjusted_acceleration * dt * player.input;
+
+        let dampened_velocity_unclamped = player.player.velocity.magnitude() - dt * friction;
+        let dampened_velocity = if dampened_velocity_unclamped < 0.0 {
+            0.0
+        } else {
+            dampened_velocity_unclamped
+        };
+        let velocity_unit = player
+            .player
+            .velocity
+            .try_normalize(0.0)
+            .unwrap_or(Vector2::new(0.0, 0.0));
+        player.player.velocity = dampened_velocity * velocity_unit;
+
+        player.player.position += dt * player.player.velocity;
+    }
+
+    // Remove expired bullets.
+    let bullets_to_remove: Vec<_> = bullets
+        .iter()
+        .filter(|(_, b)| b.lifetime > 1.0)
+        .map(|(idx, _)| idx)
+        .collect();
+    for idx in bullets_to_remove.iter() {
+        bullets.remove(*idx);
+    }
+
+    // Fire bullets.
+    for (_, player) in players.iter_mut().filter(|(_, p)| p.firing) {
+        let rof = 30.0;
+        player.fire_counter += rof * dt;
+        if player.fire_counter >= 1.0 {
+            player.fire_counter %= 1.0;
+            let idx = match bullets.try_insert(Bullet {
+                bullet: game::Bullet {
+                    id: 0,
+                    player_id: player.player.id,
+                    position: player.player.position,
+                    angle: player.angle,
+                    radius: 0.5,
+                },
+                velocity: 32.0 * Vector2::new(player.angle.cos(), player.angle.sin()),
+                lifetime: 0.0,
+            }) {
+                Ok(idx) => idx,
+                Err(_) => {
+                    eprintln!("too many bullets!");
+                    break;
+                }
+            };
+            // Set the user ID to the arena index.
+            let raw_parts = idx.into_raw_parts();
+            bullets[idx].bullet.id = ((raw_parts.0 & 10) | ((raw_parts.1 as usize) << 10)) as u16;
+        }
+    }
+
+    // Update bullets.
+    for (_, bullet) in bullets.iter_mut() {
+        bullet.bullet.position += dt * bullet.velocity;
+        bullet.lifetime += dt;
+    }
 
     // Manage collisions.
 
     // We have to collect the idxs to avoid borrowing `players`.
-    let idxs: Vec<_> = players
-        .iter()
-        .map(|(idx, _)| idx)
-        .collect();
+    let idxs: Vec<_> = players.iter().map(|(idx, _)| idx).collect();
 
     let idx_pairs = idxs
         .iter()
-        .map(|a| {
-            idxs.iter().map(move |b| (a, b))
-        })
+        .map(|a| idxs.iter().map(move |b| (a, b)))
         .flatten()
         .filter(|(a, b)| a.into_raw_parts().0 < b.into_raw_parts().0);
 
     for (a, b) in idx_pairs {
-
         let (a, b) = players.get2_mut(*a, *b);
         let a = a.unwrap();
         let b = b.unwrap();
@@ -176,7 +265,7 @@ fn step(players: &mut Arena<Player>, dt: f64) {
 
         let max_distance = a.player.radius + b.player.radius;
         if distance.magnitude_squared() >= max_distance.powi(2) {
-            continue  // No collision.
+            continue; // No collision.
         }
 
         let displacement_unit = distance.try_normalize(0.0).unwrap();
@@ -188,47 +277,30 @@ fn step(players: &mut Arena<Player>, dt: f64) {
         let elasticity = 2.0;
         a.player.velocity = 0.5 * elasticity * momentum * displacement_unit;
         b.player.velocity = -0.5 * elasticity * momentum * displacement_unit;
-
     }
-
-    // Apply player impulse.
-    for (_, player) in players.iter_mut() {
-        let acceleration = 64.0;
-        let max_velocity = 16.0;
-        let friction = 16.0;
-
-        // Acceleration ranges from `friction` to `friction + acceleration`,
-        // and is inversely proportional to the projection of the current velocity onto the input vector.
-        let acceleration_index = player.player.velocity.dot(&player.input) / max_velocity;
-        let acceleration_index = if acceleration_index < 0.0 { 0.0 } else { acceleration_index.sqrt() };
-        let adjusted_acceleration = friction + acceleration * (1.0 - acceleration_index);
-        player.player.velocity += adjusted_acceleration * dt * player.input;
-
-        let dampened_velocity_unclamped = player.player.velocity.magnitude() - dt * friction;
-        let dampened_velocity = if dampened_velocity_unclamped < 0.0 { 0.0 } else { dampened_velocity_unclamped };
-        let velocity_unit = player.player.velocity.try_normalize(0.0).unwrap_or(Vector2::new(0.0, 0.0));
-        player.player.velocity = dampened_velocity * velocity_unit;
-
-    }
-
-    for (_, player) in players.iter_mut() {
-        player.player.position += dt * player.player.velocity;
-    }
-
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+    let port: u32 = match args().nth(1).and_then(|s| s.parse().ok()) {
+        Some(port) => port,
+        None => {
+            eprintln!("Usage: {} PORT", args().nth(0).unwrap());
+            return Ok(());
+        }
+    };
 
-    let max_players = 16;
-    let mut players: Arena<Player> = Arena::with_capacity(max_players);
+    let mut players = Arena::with_capacity(16);
+    let mut bullets = Arena::with_capacity(1024);
 
-    let tick_rate = 10;
-    let tick_period = Duration::from_secs(1) / tick_rate;
-    let mut ticker = interval(tick_period);
+    let tick_rate = 60;
+    let mut ticker = interval(Duration::from_secs(1) / tick_rate);
 
-    let mut tcp_listener = TcpListener::bind("0.0.0.0:5000").await?;
-    let mut udp_socket = UdpSocket::bind("0.0.0.0:5000").await?;
+    let snapshot_rate = 10;
+    let mut snapshot_ticker = interval(Duration::from_secs(1) / snapshot_rate);
+
+    let mut tcp_listener = TcpListener::bind(format!("0.0.0.0:{}", port)).await?;
+    let mut udp_socket = UdpSocket::bind(format!("0.0.0.0:{}", port)).await?;
 
     // tcp_rx is our global receiver for TCP events.
     // This means that each player holds a copy of tcp_tx which packets are passed to.
@@ -238,7 +310,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let tick_zero = SystemTime::now();
 
     loop {
-
         const MAX_PACKET_SIZE_PLUS_ONE: usize = 64;
         let mut buf: [u8; MAX_PACKET_SIZE_PLUS_ONE] = [0; MAX_PACKET_SIZE_PLUS_ONE];
 
@@ -250,24 +321,29 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                 // Update game state.
                 let dt = 1.0 / tick_rate as f64; // TODO(jack) Measure actual elapsed time.
-                step(&mut players, dt);
+                step(&mut players, &mut bullets, dt);
+
+                tick = tick + Wrapping(1);
+
+            },
+
+            _ = snapshot_ticker.tick() => {
 
                 // Broadcast.
                 let update = game::WorldUpdate {
                     tick: tick.0,
                     players: players.iter().map(|(_, p)| p.player).collect(),
+                    bullets: bullets.iter().map(|(_, b)| b.bullet).collect(),
                 };
                 let bytes = bincode::serialize(&game::UdpClientMessage::WorldUpdate(update)).unwrap();
                 for (_, player) in players.iter().filter(|(_, p)| p.udp_addr.is_some()) {
                     udp_socket.send_to(&bytes, player.udp_addr.unwrap()).await?;
                 }
 
-                tick = tick + Wrapping(1);
-
             },
 
             accept_result = tcp_listener.accept() => match accept_result {
-                Ok((stream, _)) => accept(&mut players, stream, tcp_tx.clone(), tick_rate, tick_zero, tick.0),
+                Ok((stream, _)) => accept(&mut players, &bullets, stream, tcp_tx.clone(), tick_rate, tick_zero, tick.0),
                 Err(err) => {
                     eprintln!("{}", err);
                     break
@@ -339,6 +415,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             ).try_normalize(0.0).unwrap_or(Vector2::new(0.0, 0.0));
 
                             player.angle = input.angle;
+
+                            // TODO(jack) We probably just want to compose input in the player struct.
+                            if input.mouse_left {
+                                player.firing = true;
+                            } else {
+                                player.firing = false;
+                                player.fire_counter = 0.0;
+                            }
 
                         },
                     };
